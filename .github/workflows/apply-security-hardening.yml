@@ -1,0 +1,123 @@
+name: NAD quality CI
+
+on:
+  push:
+    branches:
+      - master
+      - audit/security-hardening
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate JavaScript
+        run: npm run check
+
+      - name: Validate whitespace
+        run: git diff --check
+
+      - name: Validate frontend safety and accessibility markers
+        run: |
+          grep -F "mobileMenuBtn.setAttribute('aria-expanded'" script.js
+          grep -F 'project-info project-info-link' proyectos.js
+          grep -F 'prefers-reduced-motion: reduce' styles.css
+          grep -F 'safeAdminMediaUrl(p.image)' admin/index.html
+          grep -F 'escapeAdminHtml(p.title)' admin/index.html
+          grep -F 'escapeAdminHtml(p.category)' admin/index.html
+
+      - name: Validate production secret guard
+        run: |
+          if env -u SESSION_SECRET NODE_ENV=production ADMIN_DEFAULT_PASS='ci-only-admin-password-2026' node -r ./security-bootstrap.js -e "process.exit(0)"; then
+            echo 'Expected production startup to fail without SESSION_SECRET'
+            exit 1
+          fi
+          NODE_ENV=production SESSION_SECRET='ci-session-secret-0123456789-abcdefghijklmnopqrstuvwxyz' node -r ./security-bootstrap.js -e "process.exit(0)"
+
+      - name: Start application
+        env:
+          PORT: 3000
+          NODE_ENV: test
+          SESSION_SECRET: ci-session-secret-0123456789-abcdefghijklmnopqrstuvwxyz
+          ADMIN_DEFAULT_PASS: ci-only-admin-password-2026
+          ADMIN_PATH: ci-admin-panel
+          DATA_DIR: /tmp/nad-ci-data
+        run: |
+          rm -rf /tmp/nad-ci-data
+          node -r ./security-bootstrap.js server.js > /tmp/nad-server.log 2>&1 &
+          echo $! > /tmp/nad-server.pid
+          for i in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/nad-server.log
+          exit 1
+
+      - name: Validate public and SEO endpoints
+        run: |
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/)" = "200"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/proyectos)" = "200"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/proyecto/1)" = "200"
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:3000/proyecto/99999999)" = "404"
+          curl --fail --silent http://127.0.0.1:3000/proyectos | grep -F '<title>Proyectos | NAD Constructora</title>'
+          curl --fail --silent http://127.0.0.1:3000/proyectos | grep -F 'rel="canonical"'
+          curl --fail --silent http://127.0.0.1:3000/proyecto/1 | grep -F '<h1>Edificio Comercial</h1>'
+
+      - name: Validate authentication and request protections
+        run: |
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -X POST \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data 'username=admin&password=ci-only-admin-password-2026' \
+            http://127.0.0.1:3000/ci-admin-panel/login)" = "403"
+
+          login_code="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -c /tmp/nad-cookies.txt \
+            -X POST \
+            -H 'Origin: http://127.0.0.1:3000' \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data 'username=admin&password=ci-only-admin-password-2026' \
+            http://127.0.0.1:3000/ci-admin-panel/login)"
+          test "$login_code" = "302"
+
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -b /tmp/nad-cookies.txt \
+            http://127.0.0.1:3000/ci-admin-panel/api/projects)" = "200"
+
+          printf 'not-a-real-jpeg' > /tmp/fake.jpg
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -b /tmp/nad-cookies.txt \
+            -H 'Origin: http://127.0.0.1:3000' \
+            -F 'asset=@/tmp/fake.jpg;type=image/jpeg' \
+            http://127.0.0.1:3000/ci-admin-panel/api/upload-asset)" = "400"
+
+      - name: Validate security headers
+        run: |
+          headers="$(curl --silent --dump-header - --output /dev/null http://127.0.0.1:3000/)"
+          echo "$headers" | grep -i '^Content-Security-Policy:'
+          echo "$headers" | grep -i '^X-Content-Type-Options: nosniff'
+
+      - name: Stop application
+        if: always()
+        run: |
+          if [ -f /tmp/nad-server.pid ]; then kill "$(cat /tmp/nad-server.pid)" 2>/dev/null || true; fi
+          if [ -f /tmp/nad-server.log ]; then cat /tmp/nad-server.log; fi

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{TITLE}} | NAD Constructora</title>
+    <meta name="description" content="{{DESCRIPTION}}">
+    <link rel="canonical" href="{{CANONICAL_URL}}">
+    <link rel="icon" type="image/png" href="/nad.png">
+
+    <meta property="og:type" content="article">
+    <meta property="og:site_name" content="NAD Constructora">
+    <meta property="og:title" content="{{TITLE}} | NAD Constructora">
+    <meta property="og:description" content="{{DESCRIPTION}}">
+    <meta property="og:image" content="{{OG_IMAGE}}">
+    <meta property="og:url" content="{{CANONICAL_URL}}">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="{{TITLE}} | NAD Constructora">
+    <meta name="twitter:description" content="{{DESCRIPTION}}">
+    <meta name="twitter:image" content="{{OG_IMAGE}}">
+
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/project-detail.css">
+</head>
+<body class="project-detail-page">
+    <header class="project-detail-header">
+        <div class="container project-detail-nav">
+            <a href="/" class="project-detail-brand" aria-label="Volver al inicio de NAD Constructora">
+                <img src="/nad.png" alt="NAD Constructora">
+            </a>
+            <nav aria-label="Navegación del proyecto">
+                <a href="/">Inicio</a>
+                <a href="/proyectos">Todos los proyectos</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="project-detail-hero">
+            <div class="container project-detail-grid">
+                <div class="project-detail-copy">
+                    <p class="project-detail-kicker">{{CATEGORY}}</p>
+                    <h1>{{TITLE}}</h1>
+                    <p class="project-detail-description">{{DESCRIPTION}}</p>
+                    <dl class="project-detail-meta">
+                        <div><dt>Ubicación</dt><dd>{{LOCATION}}</dd></div>
+                        <div><dt>Año</dt><dd>{{YEAR}}</dd></div>
+                        <div><dt>Estado</dt><dd>{{STATUS}}</dd></div>
+                    </dl>
+                    <div class="project-detail-actions">
+                        <a href="/proyectos" class="btn btn-outline-dark">Ver más proyectos</a>
+                        <a href="https://wa.me/595981076445?text={{WHATSAPP_TEXT}}" class="btn btn-primary" target="_blank" rel="noopener noreferrer">Consultar un proyecto similar</a>
+                    </div>
+                </div>
+                <div class="project-detail-primary-media">
+                    {{PRIMARY_MEDIA}}
+                </div>
+            </div>
+        </section>
+
+        {{GALLERY_SECTION}}
+    </main>
+
+    <footer class="project-detail-footer">
+        <div class="container">
+            <p>© 2026 NAD Constructora. Todos los derechos reservados.</p>
+        </div>
+    </footer>
+</body>
+</html>

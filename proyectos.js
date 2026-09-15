@@ -31,9 +31,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const mobileNav = document.getElementById('mobile-nav');
     let menuOpen = false;
     if (mobileMenuBtn) {
+        mobileMenuBtn.setAttribute('aria-expanded', 'false');
+        mobileMenuBtn.setAttribute('aria-controls', 'mobile-nav');
         mobileMenuBtn.addEventListener('click', () => {
             menuOpen = !menuOpen;
             mobileNav.classList.toggle('open', menuOpen);
+            mobileMenuBtn.setAttribute('aria-expanded', String(menuOpen));
+            mobileMenuBtn.setAttribute('aria-label', menuOpen ? 'Cerrar menú' : 'Abrir menú');
             mobileMenuBtn.innerHTML = menuOpen ? '<i data-lucide="x"></i>' : '<i data-lucide="menu"></i>';
             safeCreateIcons();
         });
@@ -210,7 +214,7 @@ function renderProjectsList(filterType) {
                             ` : ''}
                         </div>
                     </div>
-                    <div class="project-info" onclick="openProjectModal(${p.id})" style="cursor:pointer;">
+                    <a class="project-info project-info-link" href="/proyecto/${p.id}">
                         <div class="project-meta">
                             <span class="meta-badge"><i data-lucide="tag" style="width:14px;height:14px;"></i> <span>${escapeHtml(p.category)}</span></span>
                             <span class="meta-badge"><i data-lucide="map-pin" style="width:14px;height:14px;"></i> <span>${escapeHtml(p.location)}</span></span>
@@ -218,10 +222,10 @@ function renderProjectsList(filterType) {
                         <h2 class="project-title">${escapeHtml(p.title)}</h2>
                         <p class="project-desc" style="display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;">${escapeHtml(p.description)}</p>
 
-                        <button type="button" class="btn btn-primary" style="align-self:flex-start;">
+                        <span class="btn btn-primary" style="align-self:flex-start;">
                             <i data-lucide="layout-grid"></i> <span>Ver proyecto completo</span>
-                        </button>
-                    </div>
+                        </span>
+                    </a>
                 </div>
             `;
         });
@@ -264,7 +268,7 @@ function renderProjectsList(filterType) {
                                 nextEl: swiperEl.querySelector('.swiper-button-next'),
                                 prevEl: swiperEl.querySelector('.swiper-button-prev'),
                             },
-                            autoplay: {
+                            autoplay: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? false : {
                                 delay: 5000,
                                 disableOnInteraction: true,
                             }

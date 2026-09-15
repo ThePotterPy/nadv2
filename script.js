@@ -29,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const modalLoc   = document.getElementById('modal-location');
     const modalYear  = document.getElementById('modal-year');
     const modalCta   = document.getElementById('modal-cta-btn');
+    let lastModalFocus = null;
 
     // Lógica para compartir
     const shareBtn = document.getElementById('modal-share-btn');
@@ -68,6 +69,50 @@ document.addEventListener('DOMContentLoaded', () => {
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
+    }
+
+    function sanitizeCmsHtml(html) {
+        const template = document.createElement('template');
+        template.innerHTML = String(html == null ? '' : html);
+        const allowedTags = new Set(['SPAN', 'BR', 'STRONG', 'EM', 'B', 'I']);
+
+        Array.from(template.content.querySelectorAll('*')).forEach(el => {
+            if (!allowedTags.has(el.tagName)) {
+                el.replaceWith(document.createTextNode(el.textContent || ''));
+                return;
+            }
+
+            Array.from(el.attributes).forEach(attr => {
+                const allowedGradientClass = el.tagName === 'SPAN' &&
+                    attr.name === 'class' &&
+                    attr.value.split(/\s+/).filter(Boolean).every(c => c === 'text-gradient');
+                if (!allowedGradientClass) el.removeAttribute(attr.name);
+            });
+        });
+
+        return template.innerHTML;
+    }
+
+    function safeHttpUrl(value) {
+        if (!value) return null;
+        try {
+            const url = new URL(String(value), window.location.origin);
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+            return url.href;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function safeMediaUrl(value) {
+        if (!value) return null;
+        try {
+            const url = new URL(String(value), window.location.origin);
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+            return url.href;
+        } catch (e) {
+            return null;
+        }
     }
 
     // ── Header, Scroll Progress & Parallax ──────────────────────────────────
@@ -121,13 +166,19 @@ document.addEventListener('DOMContentLoaded', () => {
     function toggleMenu() {
         menuOpen = !menuOpen;
         mobileNav.classList.toggle('open', menuOpen);
+        mobileMenuBtn.setAttribute('aria-expanded', String(menuOpen));
+        mobileMenuBtn.setAttribute('aria-label', menuOpen ? 'Cerrar menú' : 'Abrir menú');
         mobileMenuBtn.innerHTML = menuOpen
             ? '<i data-lucide="x"></i>'
             : '<i data-lucide="menu"></i>';
         safeCreateIcons();
     }
 
-    if (mobileMenuBtn) mobileMenuBtn.addEventListener('click', toggleMenu);
+    if (mobileMenuBtn) {
+        mobileMenuBtn.setAttribute('aria-expanded', 'false');
+        mobileMenuBtn.setAttribute('aria-controls', 'mobile-nav');
+        mobileMenuBtn.addEventListener('click', toggleMenu);
+    }
     document.querySelectorAll('.mobile-link').forEach(link => {
         link.addEventListener('click', () => { if (menuOpen) toggleMenu(); });
     });
@@ -222,6 +273,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function openModal(btn) {
         if (!modal) return;
+        lastModalFocus = document.activeElement;
         const mediaUrl = btn.dataset.image || '';
         const isVideo  = /\.(mp4|webm|mov)$/i.test(mediaUrl);
 
@@ -263,6 +315,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 modal.classList.add('active');
                 modal.setAttribute('aria-hidden', 'false');
                 document.body.style.overflow = 'hidden';
+                if (modalClose) modalClose.focus();
                 safeCreateIcons();
             });
         });
@@ -280,6 +333,7 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => {
             if (!modal.classList.contains('active')) {
                 modal.style.display = 'none';
+                if (lastModalFocus && typeof lastModalFocus.focus === 'function') lastModalFocus.focus();
             }
         }, 400);
     }
@@ -311,7 +365,20 @@ document.addEventListener('DOMContentLoaded', () => {
         modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
     }
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && modal && modal.classList.contains('active')) closeModal();
+        if (!modal || !modal.classList.contains('active')) return;
+        if (e.key === 'Escape') {
+            closeModal();
+            return;
+        }
+        if (e.key === 'Tab') {
+            const focusable = Array.from(modal.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+                .filter(el => !el.hasAttribute('hidden') && el.offsetParent !== null);
+            if (!focusable.length) return;
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
     });
 
     // (Botón "Ver más proyectos" ahora es un enlace a proyectos, no requiere JS)
@@ -375,7 +442,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (child !== cmsHeroBg) child.remove();
                         });
                         
-                        images.hero_slider.forEach((imgSrc) => {
+                        images.hero_slider.map(safeMediaUrl).filter(Boolean).forEach((imgSrc) => {
                             const slide = document.createElement('div');
                             slide.className = 'hero-bg slide';
                             slide.style.backgroundImage = `url('${imgSrc}')`;
@@ -439,7 +506,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         // Título personalizable
                         if (clientsTitle && cc.title !== undefined) clientsTitle.textContent = cc.title || 'Nuestros Clientes';
                         
-                        let logosToRender = images.clients_logos;
+                        let logosToRender = images.clients_logos.map(safeMediaUrl).filter(Boolean);
                         // Multiplicar logos si son muy pocos para que cubran toda la pantalla
                         if (logosToRender.length > 0) {
                             while (logosToRender.length < 12) {
@@ -475,7 +542,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const setHtml = (id, html) => {
                     const el = document.getElementById(id);
-                    if (el && html !== undefined) el.innerHTML = html;
+                    if (el && html !== undefined) el.innerHTML = sanitizeCmsHtml(html);
                 };
                 const setText = (id, txt) => {
                     const el = document.getElementById(id);
@@ -557,16 +624,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (texts.contact_wsp_link) {
                     ['btn-wsp-header', 'cms-hero-btn-contact-link', 'cms-cta-btn-wsp-link', 'cms-footer-wsp-link', 'cms-wsp-float', 'cms-contact-phone-link'].forEach(id => {
                         const el = document.getElementById(id);
-                        if (el) el.href = texts.contact_wsp_link;
+                        if (el) {
+                            const safeUrl = safeHttpUrl(texts.contact_wsp_link);
+                            if (safeUrl) el.href = safeUrl;
+                        }
                     });
                 }
                 if (texts.contact_instagram) {
-                    const igUrl = texts.contact_instagram.startsWith('http') 
-                        ? texts.contact_instagram 
+                    const igCandidate = texts.contact_instagram.startsWith('http')
+                        ? texts.contact_instagram
                         : `https://www.instagram.com/${texts.contact_instagram.replace('@', '')}/`;
+                    const igUrl = safeHttpUrl(igCandidate);
                     ['cms-cta-btn-ig-link', 'cms-footer-ig-link', 'cms-contact-ig-link'].forEach(id => {
                         const el = document.getElementById(id);
-                        if (el) el.href = igUrl;
+                        if (el && igUrl) el.href = igUrl;
                     });
                 }
                 if (texts.contact_email) {
@@ -582,6 +653,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (content.video && content.video.src && videoUrls.length === 0) {
                 videoUrls = [content.video.src];
             }
+            videoUrls = videoUrls.map(safeMediaUrl).filter(Boolean);
 
             const videoSec = document.getElementById('video-institucional');
             if (videoSec) {

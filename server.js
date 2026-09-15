@@ -7,6 +7,8 @@ const path = require('path');
 const fs = require('fs');
 const compression = require('compression');
 const helmet = require('helmet');
+const { getSessionSecret, getInitialAdminPassword, isProductionEnvironment } = require('./lib/security-config');
+const SQLiteSessionStore = require('./lib/sqlite-session-store');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -244,10 +246,14 @@ db.serialize(() => {
     // Crear admin por defecto si no existe
     db.get('SELECT id FROM admin WHERE id = 1', (err, row) => {
         if (!row) {
-            const defaultPass = process.env.ADMIN_DEFAULT_PASS || 'nad2026';
-            const hashed = bcrypt.hashSync(defaultPass, 10);
+            const defaultPass = getInitialAdminPassword();
+            if (!defaultPass) {
+                console.warn('⚠️ ADMIN_DEFAULT_PASS no configurado: no se creará un administrador inicial.');
+                return;
+            }
+            const hashed = bcrypt.hashSync(defaultPass, 12);
             db.run("INSERT INTO admin (username, password) VALUES ('admin', ?)", [hashed]);
-            console.log(`✅ Admin inicial verificado (usuario: admin)`);
+            console.log('✅ Admin inicial creado (usuario: admin)');
         }
     });
 
@@ -293,18 +299,84 @@ const storage = multer.diskStorage({
         cb(null, name);
     }
 });
+const ALLOWED_UPLOAD_TYPES = new Map([
+    ['.jpg', new Set(['image/jpeg'])],
+    ['.jpeg', new Set(['image/jpeg'])],
+    ['.jfif', new Set(['image/jpeg'])],
+    ['.png', new Set(['image/png'])],
+    ['.webp', new Set(['image/webp'])],
+    ['.gif', new Set(['image/gif'])],
+    ['.avif', new Set(['image/avif'])],
+    ['.bmp', new Set(['image/bmp', 'image/x-ms-bmp'])],
+    ['.mp4', new Set(['video/mp4'])],
+    ['.mov', new Set(['video/quicktime'])],
+    ['.webm', new Set(['video/webm'])]
+]);
+
 const upload = multer({
     storage,
     limits: { fileSize: 25 * 1024 * 1024 }, // 25MB máx
     fileFilter: (req, file, cb) => {
-        const ok = /\.(jpe?g|png|webp|gif|svg|mp4|mov|webm|jfif|avif|bmp)$/i.test(path.extname(file.originalname));
-        if (ok) {
-            cb(null, true);
-        } else {
-            cb(new Error('Formato de archivo no admitido. Usá JPG, PNG, WEBP, GIF, SVG o MP4.'));
+        const ext = path.extname(file.originalname).toLowerCase();
+        const allowedMimes = ALLOWED_UPLOAD_TYPES.get(ext);
+        if (allowedMimes && allowedMimes.has(file.mimetype)) {
+            return cb(null, true);
         }
+        return cb(new Error('Formato o tipo MIME no admitido. Usá JPG, PNG, WEBP, GIF, AVIF, BMP, MP4, MOV o WEBM.'));
     }
 });
+
+function hasUploadSignature(file) {
+    if (!file || !file.path) return false;
+    const ext = path.extname(file.filename || file.originalname || '').toLowerCase();
+    const fd = fs.openSync(file.path, 'r');
+    const buffer = Buffer.alloc(32);
+    let bytesRead = 0;
+    try {
+        bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    } finally {
+        fs.closeSync(fd);
+    }
+    const b = buffer.subarray(0, bytesRead);
+    const starts = (...values) => values.every((v, i) => b[i] === v);
+    const ascii = b.toString('ascii');
+
+    if (['.jpg', '.jpeg', '.jfif'].includes(ext)) return starts(0xff, 0xd8, 0xff);
+    if (ext === '.png') return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+    if (ext === '.gif') return ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a');
+    if (ext === '.webp') return ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP';
+    if (ext === '.bmp') return ascii.startsWith('BM');
+    if (ext === '.webm') return starts(0x1a, 0x45, 0xdf, 0xa3);
+    if (ext === '.avif') return ascii.slice(4, 8) === 'ftyp' && (ascii.includes('avif') || ascii.includes('avis'));
+    if (ext === '.mp4' || ext === '.mov') return ascii.slice(4, 8) === 'ftyp';
+    return false;
+}
+
+function validateUploadedFiles(req, res, next) {
+    const files = [];
+    if (req.file) files.push(req.file);
+    if (req.files) {
+        for (const value of Object.values(req.files)) {
+            if (Array.isArray(value)) files.push(...value);
+        }
+    }
+
+    try {
+        const invalid = files.find(file => !hasUploadSignature(file));
+        if (!invalid) return next();
+
+        for (const file of files) {
+            try { if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch (err) { }
+        }
+        return res.status(400).json({ error: 'El contenido real del archivo no coincide con un formato permitido.' });
+    } catch (err) {
+        for (const file of files) {
+            try { if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch (cleanupErr) { }
+        }
+        console.error('Error validando firma de archivo:', err);
+        return res.status(400).json({ error: 'No se pudo validar el archivo subido.' });
+    }
+}
 
 // Helper para borrar un archivo de uploads de forma segura (evita huérfanos en disco)
 function deleteUploadFile(fileUrl) {
@@ -322,7 +394,57 @@ function deleteUploadFile(fileUrl) {
 
 // ── Middleware ───────────────────────────────────────────────────────────────
 app.use(compression());
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({
+    contentSecurityPolicy: {
+        useDefaults: true,
+        directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: [
+                "'self'",
+                "'unsafe-inline'",
+                'https://unpkg.com',
+                'https://cdn.jsdelivr.net',
+                'https://cdn.plyr.io',
+                'https://www.instagram.com'
+            ],
+            scriptSrcAttr: ["'unsafe-inline'"],
+            styleSrc: [
+                "'self'",
+                "'unsafe-inline'",
+                'https://cdn.plyr.io',
+                'https://cdn.jsdelivr.net',
+                'https://cdnjs.cloudflare.com',
+                'https://fonts.googleapis.com'
+            ],
+            fontSrc: [
+                "'self'",
+                'data:',
+                'https://fonts.gstatic.com',
+                'https://cdnjs.cloudflare.com'
+            ],
+            imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+            mediaSrc: ["'self'", 'blob:', 'https:'],
+            frameSrc: [
+                "'self'",
+                'https://www.youtube.com',
+                'https://youtube.com',
+                'https://www.youtube-nocookie.com',
+                'https://www.instagram.com',
+                'https://www.google.com'
+            ],
+            connectSrc: [
+                "'self'",
+                'https://www.instagram.com',
+                'https://graph.instagram.com'
+            ],
+            objectSrc: ["'none'"],
+            baseUri: ["'self'"],
+            formAction: ["'self'"],
+            frameAncestors: ["'self'"],
+            upgradeInsecureRequests: null
+        }
+    }
+}));
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
@@ -340,6 +462,31 @@ const defaultMeta = {
     image: '/nad.png',
     url: '/'
 };
+
+function escapeHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function upsertMetaTag(html, attribute, name, content) {
+    const safeContent = escapeHtml(content);
+    const prefix = '<meta ' + attribute + '="' + name + '" content="';
+    const lowerHtml = html.toLowerCase();
+    const start = lowerHtml.indexOf(prefix.toLowerCase());
+    if (start !== -1) {
+        const contentStart = start + prefix.length;
+        const contentEnd = html.indexOf('"', contentStart);
+        if (contentEnd !== -1) {
+            return html.slice(0, contentStart) + safeContent + html.slice(contentEnd);
+        }
+    }
+    const tag = prefix + safeContent + '">';
+    return html.replace('</head>', '    ' + tag + '\n</head>');
+}
 
 // ── Caché en memoria ─────────────────────────────────────────────────────────
 // Convierte un hex (#RRGGBB) a "r, g, b" para poder armarlo en un rgba() con
@@ -467,24 +614,44 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
             }
 
             if (metaOverride.title) {
-                html = html.replace(/<title>[^<]*<\/title>/i, `<title>${meta.title}</title>`);
-                html = html.replace(/<meta property="og:title" content="[^"]*"/i, `<meta property="og:title" content="${meta.title}"`);
-                html = html.replace(/<meta name="twitter:title" content="[^"]*"/i, `<meta name="twitter:title" content="${meta.title}"`);
+                html = html.replace(/<title>[^<]*<\/title>/i, `<title>${escapeHtml(meta.title)}</title>`);
+                html = html.replace(/<meta property="og:title" content="[^"]*"/i, `<meta property="og:title" content="${escapeHtml(meta.title)}"`);
+                html = html.replace(/<meta name="twitter:title" content="[^"]*"/i, `<meta name="twitter:title" content="${escapeHtml(meta.title)}"`);
             }
             if (metaOverride.desc) {
-                html = html.replace(/<meta name="description" content="[^"]*"/i, `<meta name="description" content="${meta.desc}"`);
-                html = html.replace(/<meta property="og:description" content="[^"]*"/i, `<meta property="og:description" content="${meta.desc}"`);
-                html = html.replace(/<meta name="twitter:description" content="[^"]*"/i, `<meta name="twitter:description" content="${meta.desc}"`);
+                html = html.replace(/<meta name="description" content="[^"]*"/i, `<meta name="description" content="${escapeHtml(meta.desc)}"`);
+                html = html.replace(/<meta property="og:description" content="[^"]*"/i, `<meta property="og:description" content="${escapeHtml(meta.desc)}"`);
+                html = html.replace(/<meta name="twitter:description" content="[^"]*"/i, `<meta name="twitter:description" content="${escapeHtml(meta.desc)}"`);
             }
             if (metaOverride.image) {
                 const img = meta.image.startsWith('http') ? meta.image : DOMAIN + meta.image;
-                html = html.replace(/<meta property="og:image" content="[^"]*"/i, `<meta property="og:image" content="${img}"`);
-                html = html.replace(/<meta name="twitter:image" content="[^"]*"/i, `<meta name="twitter:image" content="${img}"`);
+                html = html.replace(/<meta property="og:image" content="[^"]*"/i, `<meta property="og:image" content="${escapeHtml(img)}"`);
+                html = html.replace(/<meta name="twitter:image" content="[^"]*"/i, `<meta name="twitter:image" content="${escapeHtml(img)}"`);
             }
             if (metaOverride.url) {
                 const u = meta.url.startsWith('http') ? meta.url : DOMAIN + meta.url;
-                html = html.replace(/<meta property="og:url" content="[^"]*"/i, `<meta property="og:url" content="${u}"`);
+                html = html.replace(/<meta property="og:url" content="[^"]*"/i, `<meta property="og:url" content="${escapeHtml(u)}"`);
             }
+            const canonicalPath = metaOverride.url || (req.path === '/index.html' ? '/' : req.path);
+            const canonicalUrl = canonicalPath.startsWith('http') ? canonicalPath : DOMAIN + canonicalPath;
+            const socialImage = meta.image && meta.image.startsWith('http') ? meta.image : DOMAIN + (meta.image || '/nad.png');
+
+            html = upsertMetaTag(html, 'property', 'og:title', meta.title);
+            html = upsertMetaTag(html, 'property', 'og:description', meta.desc);
+            html = upsertMetaTag(html, 'property', 'og:image', socialImage);
+            html = upsertMetaTag(html, 'property', 'og:url', canonicalUrl);
+            html = upsertMetaTag(html, 'name', 'twitter:card', 'summary_large_image');
+            html = upsertMetaTag(html, 'name', 'twitter:title', meta.title);
+            html = upsertMetaTag(html, 'name', 'twitter:description', meta.desc);
+            html = upsertMetaTag(html, 'name', 'twitter:image', socialImage);
+
+            const canonicalTag = '<link rel="canonical" href="' + escapeHtml(canonicalUrl) + '">';
+            if (/<link\s+rel=["']canonical["'][^>]*>/i.test(html)) {
+                html = html.replace(/<link\s+rel=["']canonical["'][^>]*>/i, canonicalTag);
+            } else {
+                html = html.replace('</head>', '    ' + canonicalTag + '\n</head>');
+            }
+
             res.send(html);
     } catch (e) {
         console.error('Error renderizando página:', e);
@@ -494,26 +661,96 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
 
 app.get('/', (req, res) => renderPageWithMeta('index.html', req, res));
 app.get('/index.html', (req, res) => res.redirect(301, '/'));
-app.get('/proyectos', (req, res) => renderPageWithMeta('proyectos.html', req, res));
+app.get('/proyectos', (req, res) => renderPageWithMeta('proyectos.html', req, res, {
+    title: 'Proyectos | NAD Constructora',
+    desc: 'Conocé proyectos de arquitectura, diseño estructural y construcción desarrollados por NAD Constructora en Paraguay.',
+    image: '/nad.png',
+    url: '/proyectos'
+}));
 app.get('/proyectos.html', (req, res) => res.redirect(301, '/proyectos'));
 
+function safePublicMediaUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    if (raw.startsWith('/') && !raw.startsWith('//')) return raw;
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
+    } catch (err) { }
+    return null;
+}
+
+function renderProjectPage(req, res, row) {
+    const domain = req.protocol + '://' + req.get('host');
+    const canonicalUrl = domain + '/proyecto/' + row.id;
+    const primaryUrl = safePublicMediaUrl(row.image) || '/nad.png';
+    const isPrimaryVideo = /\.(mp4|webm|mov)(?:$|\?)/i.test(primaryUrl);
+    const primaryMedia = isPrimaryVideo
+        ? `<video src="${escapeHtml(primaryUrl)}" controls playsinline preload="metadata"></video>`
+        : `<img src="${escapeHtml(primaryUrl)}" alt="${escapeHtml(row.title)}" loading="eager" decoding="async">`;
+
+    let galleryItems = [];
+    try {
+        const parsed = JSON.parse(row.extra_media || '[]');
+        if (Array.isArray(parsed)) galleryItems = parsed;
+    } catch (err) { }
+
+    const galleryHtml = galleryItems
+        .map(safePublicMediaUrl)
+        .filter(Boolean)
+        .map((url, index) => {
+            if (/\.(mp4|webm|mov)(?:$|\?)/i.test(url)) {
+                return `<div class="project-gallery-item"><video src="${escapeHtml(url)}" controls playsinline preload="metadata"></video></div>`;
+            }
+            return `<div class="project-gallery-item"><img src="${escapeHtml(url)}" alt="${escapeHtml(row.title)} — imagen ${index + 1}" loading="lazy" decoding="async"></div>`;
+        })
+        .join('');
+
+    const gallerySection = galleryHtml
+        ? `<section class="project-gallery"><div class="container"><h2>Galería del proyecto</h2><div class="project-gallery-grid">${galleryHtml}</div></div></section>`
+        : '';
+
+    const ogImage = isPrimaryVideo
+        ? domain + '/nad.png'
+        : (primaryUrl.startsWith('http') ? primaryUrl : domain + primaryUrl);
+
+    const replacements = {
+        '{{TITLE}}': escapeHtml(row.title || 'Proyecto'),
+        '{{DESCRIPTION}}': escapeHtml(row.description || defaultMeta.desc),
+        '{{CATEGORY}}': escapeHtml(row.category || 'Proyecto NAD'),
+        '{{LOCATION}}': escapeHtml(row.location || 'Paraguay'),
+        '{{YEAR}}': escapeHtml(row.year || ''),
+        '{{STATUS}}': escapeHtml(row.status || 'Terminado'),
+        '{{CANONICAL_URL}}': escapeHtml(canonicalUrl),
+        '{{OG_IMAGE}}': escapeHtml(ogImage),
+        '{{WHATSAPP_TEXT}}': encodeURIComponent(`Hola NAD Constructora, quiero consultar por un proyecto similar a "${row.title || 'este proyecto'}".`),
+        '{{PRIMARY_MEDIA}}': primaryMedia,
+        '{{GALLERY_SECTION}}': gallerySection
+    };
+
+    let html = getHtmlTemplate('project.html');
+    for (const [placeholder, value] of Object.entries(replacements)) {
+        html = html.split(placeholder).join(value);
+    }
+
+    res.type('html').send(html);
+}
+
 app.get('/proyecto/:id', (req, res) => {
-    db.get('SELECT * FROM projects WHERE id = ?', [req.params.id], (err, row) => {
-        if (err || !row) return renderPageWithMeta('index.html', req, res); // fallback
-        const meta = {
-            title: row.title + ' | NAD Constructora',
-            desc: row.description || defaultMeta.desc,
-            image: row.image ? row.image : defaultMeta.image,
-            url: '/proyecto/' + row.id
-        };
-        renderPageWithMeta('index.html', req, res, meta);
+    db.get('SELECT * FROM projects WHERE id = ? AND visible = 1', [req.params.id], (err, row) => {
+        if (err) {
+            console.error('Error cargando proyecto:', err);
+            return res.status(500).send('Error interno');
+        }
+        if (!row) return res.status(404).send('Proyecto no encontrado');
+        return renderProjectPage(req, res, row);
     });
 });
 
 // Servir solo archivos estáticos seguros (CSS, JS del cliente, imágenes, fuentes)
 // Middleware que bloquea archivos sensibles ANTES de que express.static los sirva
 const SAFE_EXTENSIONS = new Set(['.css', '.js', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.webm', '.mov', '.avif', '.bmp', '.jfif', '.html']);
-const BLOCKED_FILES = new Set(['server.js', 'package.json', 'package-lock.json', '.env', '.gitignore', 'railway.json']);
+const BLOCKED_FILES = new Set(['server.js', 'security-bootstrap.js', 'project.html', 'package.json', 'package-lock.json', '.env', '.env.example', '.gitignore', 'railway.json']);
 app.use((req, res, next) => {
     const reqPath = decodeURIComponent(req.path);
     const basename = path.basename(reqPath);
@@ -521,7 +758,7 @@ app.use((req, res, next) => {
     // Bloquear archivos sensibles explícitamente
     if (BLOCKED_FILES.has(basename)) return res.status(404).send('Not found');
     // Bloquear acceso a directorios sensibles
-    if (reqPath.includes('/data/') || reqPath.includes('/node_modules/') || reqPath.includes('/.git/') || reqPath.includes('/backup_')) {
+    if (reqPath.includes('/data/') || reqPath.includes('/node_modules/') || reqPath.includes('/.git/') || reqPath.includes('/.github/') || reqPath.includes('/lib/') || reqPath.includes('/scripts/') || reqPath.includes('/backup_')) {
         return res.status(404).send('Not found');
     }
     // Bloquear extensiones no seguras (.db, .py, .env, .sql, etc.)
@@ -550,15 +787,17 @@ app.use(express.static(__dirname, {
 }));
 
 app.use(session({
-    secret: process.env.SESSION_SECRET || 'nad-secret-2026-xK9mP',
+    name: 'nad.sid',
+    store: new SQLiteSessionStore(db),
+    secret: getSessionSecret(),
     resave: false,
     saveUninitialized: false,
+    rolling: true,
     cookie: {
         maxAge: 8 * 60 * 60 * 1000,
         httpOnly: true,
-        sameSite: 'lax',
-        // En producción (Railway, etc.) forzar cookie segura automáticamente
-        secure: process.env.NODE_ENV === 'production' || process.env.COOKIE_SECURE === 'true'
+        sameSite: 'strict',
+        secure: isProductionEnvironment() || process.env.COOKIE_SECURE === 'true'
     }
 }));
 
@@ -566,6 +805,19 @@ app.use(session({
 function requireAuth(req, res, next) {
     if (req.session && req.session.admin) return next();
     return res.redirect(`/${ADMIN_PATH}/login`);
+}
+
+function requireSameOrigin(req, res, next) {
+    const expectedOrigin = req.protocol + '://' + req.get('host');
+    const origin = req.get('origin');
+    const referer = req.get('referer');
+
+    try {
+        if (origin && new URL(origin).origin === expectedOrigin) return next();
+        if (!origin && referer && new URL(referer).origin === expectedOrigin) return next();
+    } catch (err) { }
+
+    return res.status(403).json({ error: 'Origen de solicitud no permitido' });
 }
 
 // Rate limiting para login (máx 5 intentos, bloqueo 15 min)
@@ -628,7 +880,7 @@ app.get(`/${ADMIN_PATH}/login`, (req, res) => {
     res.sendFile(path.join(__dirname, 'admin', 'login.html'));
 });
 
-app.post(`/${ADMIN_PATH}/login`, async (req, res) => {
+app.post(`/${ADMIN_PATH}/login`, requireSameOrigin, async (req, res) => {
     const ip = req.ip || req.connection.remoteAddress;
     try {
         const limit = await checkRateLimit(ip);
@@ -648,20 +900,35 @@ app.post(`/${ADMIN_PATH}/login`, async (req, res) => {
         }
 
         await resetAttempts(ip);
+        await new Promise((resolve, reject) => {
+            req.session.regenerate(err => err ? reject(err) : resolve());
+        });
         req.session.admin = { id: admin.id, username: admin.username };
-        res.redirect(`/${ADMIN_PATH}`);
+        await new Promise((resolve, reject) => {
+            req.session.save(err => err ? reject(err) : resolve());
+        });
+        return res.redirect(`/${ADMIN_PATH}`);
     } catch (e) {
         console.error(e);
         res.redirect(`/${ADMIN_PATH}/login?error=1`);
     }
 });
 
-app.get(`/${ADMIN_PATH}/logout`, (req, res) => {
-    req.session.destroy(() => res.redirect(`/${ADMIN_PATH}/login`));
+app.post(`/${ADMIN_PATH}/logout`, requireAuth, requireSameOrigin, (req, res) => {
+    req.session.destroy(err => {
+        if (err) return res.status(500).json({ error: 'No se pudo cerrar la sesión' });
+        res.clearCookie('nad.sid');
+        return res.status(204).end();
+    });
 });
 
 app.get(`/${ADMIN_PATH}`, requireAuth, (req, res) => {
     res.sendFile(path.join(__dirname, 'admin', 'index.html'));
+});
+
+app.use(`/${ADMIN_PATH}/api`, (req, res, next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    return requireSameOrigin(req, res, next);
 });
 
 // ── API admin: Proyectos ─────────────────────────────────────────────────────
@@ -675,7 +942,7 @@ app.get(`/${ADMIN_PATH}/api/projects`, requireAuth, async (req, res) => {
 app.post(`/${ADMIN_PATH}/api/projects`, requireAuth, (req, res, next) => {
     upload.fields([{ name: 'image', maxCount: 1 }, { name: 'extra_media', maxCount: 15 }])(req, res, err => {
         if (err) return res.status(400).json({ error: err.message });
-        next();
+        return validateUploadedFiles(req, res, next);
     });
 }, async (req, res) => {
     if (!req.files || !req.files['image']) return res.status(400).json({ error: 'Se requiere una imagen o video para el proyecto' });
@@ -711,7 +978,7 @@ app.post(`/${ADMIN_PATH}/api/projects`, requireAuth, (req, res, next) => {
 app.put(`/${ADMIN_PATH}/api/projects/:id`, requireAuth, (req, res, next) => {
     upload.fields([{ name: 'image', maxCount: 1 }, { name: 'extra_media', maxCount: 15 }])(req, res, err => {
         if (err) return res.status(400).json({ error: err.message });
-        next();
+        return validateUploadedFiles(req, res, next);
     });
 }, async (req, res) => {
     const { title, category, description, location, year, featured, visible, kept_extra_media, status } = req.body;
@@ -883,7 +1150,7 @@ app.put(`/${ADMIN_PATH}/api/content`, requireAuth, async (req, res) => {
 app.post(`/${ADMIN_PATH}/api/upload-asset`, requireAuth, (req, res, next) => {
     upload.single('asset')(req, res, err => {
         if (err) return res.status(400).json({ error: err.message });
-        next();
+        return validateUploadedFiles(req, res, next);
     });
 }, (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No se envió ningún archivo de imagen' });
@@ -916,8 +1183,8 @@ app.post(`/${ADMIN_PATH}/api/change-password`, requireAuth, async (req, res) => 
     if (!current || !newPass) {
         return res.status(400).json({ error: 'Debes ingresar la contraseña actual y la nueva' });
     }
-    if (newPass.length < 6) {
-        return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres' });
+    if (newPass.length < 12) {
+        return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 12 caracteres' });
     }
     try {
         const admin = await dbGet('SELECT * FROM admin WHERE id = ?', [req.session.admin.id]);
