@@ -7,6 +7,8 @@ const path = require('path');
 const fs = require('fs');
 const compression = require('compression');
 const helmet = require('helmet');
+const sharp = require('sharp');
+const archiver = require('archiver');
 const { getSessionSecret, getInitialAdminPassword, isProductionEnvironment } = require('./lib/security-config');
 const SQLiteSessionStore = require('./lib/sqlite-session-store');
 
@@ -352,6 +354,28 @@ function hasUploadSignature(file) {
     return false;
 }
 
+const MAX_IMAGE_WIDTH = 1920;
+const COMPRESSIBLE_EXT = new Set(['.jpg', '.jpeg', '.jfif', '.png', '.webp']);
+
+async function optimizeImageOnDisk(filePath, ext) {
+    if (!COMPRESSIBLE_EXT.has(ext)) return;
+    try {
+        const buffer = await fs.promises.readFile(filePath);
+        let img = sharp(buffer, { failOn: 'none' }).rotate(); // respeta orientación EXIF
+        const meta = await img.metadata();
+        if (meta.width && meta.width > MAX_IMAGE_WIDTH) {
+            img = img.resize({ width: MAX_IMAGE_WIDTH, withoutEnlargement: true });
+        }
+        let outBuffer;
+        if (ext === '.png') outBuffer = await img.png({ quality: 82, compressionLevel: 8 }).toBuffer();
+        else if (ext === '.webp') outBuffer = await img.webp({ quality: 82 }).toBuffer();
+        else outBuffer = await img.jpeg({ quality: 82, mozjpeg: true }).toBuffer();
+        await fs.promises.writeFile(filePath, outBuffer);
+    } catch (err) {
+        console.warn('No se pudo comprimir la imagen, se conserva original:', err.message);
+    }
+}
+
 function validateUploadedFiles(req, res, next) {
     const files = [];
     if (req.file) files.push(req.file);
@@ -363,7 +387,15 @@ function validateUploadedFiles(req, res, next) {
 
     try {
         const invalid = files.find(file => !hasUploadSignature(file));
-        if (!invalid) return next();
+        if (!invalid) {
+            // Optimizar imágenes válidas en disco en segundo plano antes de continuar
+            Promise.all(files.map(file => {
+                const ext = path.extname(file.path || file.filename || '').toLowerCase();
+                return optimizeImageOnDisk(file.path, ext);
+            })).catch(err => console.warn('Error optimizando imágenes:', err.message));
+
+            return next();
+        }
 
         for (const file of files) {
             try { if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch (err) { }
@@ -498,6 +530,18 @@ function hexToRgbParts(hex, fallback = '255, 255, 255') {
     return `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
 }
 
+// Multiplicador de intensidad del difuminado (1 = normal). Clamp para que un
+// valor inválido o extremo del CMS no rompa el CSS ni deje un efecto absurdo.
+function glowIntensity(raw) {
+    const n = parseFloat(raw);
+    if (!isFinite(n) || n <= 0) return 1;
+    return Math.min(2.5, Math.max(0.3, n));
+}
+// Escala una opacidad base según la intensidad, sin pasarse nunca de 1.
+function op(base, intensity) {
+    return Math.min(1, base * intensity).toFixed(2);
+}
+
 // Las plantillas HTML no cambian en tiempo de ejecución: se leen del disco una
 // sola vez al arrancar en lugar de en cada visita (evita I/O por request bajo carga).
 const htmlTemplateCache = {};
@@ -575,14 +619,26 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
                         allUsedFonts.add(s.font_body);
                     }
                     // Difuminado del logo/menú mientras el header flota sobre el hero
-                    if (key === 'navbar' && (s.hero_glow_enabled !== undefined || s.hero_glow_color)) {
+                    if (key === 'navbar' && (s.hero_glow_enabled !== undefined || s.hero_glow_color || s.hero_glow_intensity)) {
                         if (s.hero_glow_enabled === '0') {
                             vars += `--hero-glow-filter:drop-shadow(0 2px 8px rgba(0,0,0,.5));`;
                             vars += `--hero-glow-text-shadow:0 1px 4px rgba(0,0,0,.6);`;
                         } else {
                             const rgb = hexToRgbParts(s.hero_glow_color);
-                            vars += `--hero-glow-filter:drop-shadow(0 0 6px rgba(${rgb},.55)) drop-shadow(0 2px 8px rgba(0,0,0,.5));`;
-                            vars += `--hero-glow-text-shadow:0 0 4px rgba(${rgb},.4), 0 1px 6px rgba(0,0,0,.45);`;
+                            const i = glowIntensity(s.hero_glow_intensity);
+                            vars += `--hero-glow-filter:drop-shadow(0 0 ${6 * i}px rgba(${rgb},${op(.55, i)})) drop-shadow(0 2px 8px rgba(0,0,0,.5));`;
+                            vars += `--hero-glow-text-shadow:0 0 ${4 * i}px rgba(${rgb},${op(.4, i)}), 0 1px 6px rgba(0,0,0,.45);`;
+                        }
+                    }
+                    // Difuminado del título del hero (H1), independiente del de la barra:
+                    // ayuda a que el texto se siga leyendo si la foto de fondo tiene zonas claras.
+                    if (key === 'hero' && (s.heading_glow_enabled !== undefined || s.heading_glow_color || s.heading_glow_intensity)) {
+                        if (s.heading_glow_enabled === '0') {
+                            vars += `--heading-glow-text-shadow:none;`;
+                        } else {
+                            const rgb = hexToRgbParts(s.heading_glow_color);
+                            const i = glowIntensity(s.heading_glow_intensity);
+                            vars += `--heading-glow-text-shadow:0 0 ${18 * i}px rgba(${rgb},${op(.5, i)}), 0 2px 10px rgba(0,0,0,.4);`;
                         }
                     }
                     if (vars) sectionCss += `${sel}{${vars}}`;
@@ -749,9 +805,11 @@ app.get('/proyecto/:id', (req, res) => {
 
 // Servir solo archivos estáticos seguros (CSS, JS del cliente, imágenes, fuentes)
 // Middleware que bloquea archivos sensibles ANTES de que express.static los sirva
-const SAFE_EXTENSIONS = new Set(['.css', '.js', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.webm', '.mov', '.avif', '.bmp', '.jfif', '.html']);
+const SAFE_EXTENSIONS = new Set(['.css', '.js', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.ico', '.woff', '.woff2', '.ttf', '.otf', '.eot', '.mp4', '.webm', '.mov', '.avif', '.bmp', '.jfif', '.html']);
 const BLOCKED_FILES = new Set(['server.js', 'security-bootstrap.js', 'project.html', 'package.json', 'package-lock.json', '.env', '.env.example', '.gitignore', 'railway.json']);
+const DYNAMIC_ROUTES = new Set(['/sitemap.xml', '/robots.txt']);
 app.use((req, res, next) => {
+    if (DYNAMIC_ROUTES.has(req.path)) return next();
     const reqPath = decodeURIComponent(req.path);
     const basename = path.basename(reqPath);
     const ext = path.extname(basename).toLowerCase();
@@ -1168,14 +1226,26 @@ app.post(`/${ADMIN_PATH}/api/delete-asset`, requireAuth, (req, res) => {
     res.json({ success: true });
 });
 
-// Descarga directa de respaldo de la base de datos (.db)
+// Descarga directa de respaldo completo (.zip con base de datos y uploads)
 app.get(`/${ADMIN_PATH}/api/backup-db`, requireAuth, (req, res) => {
     const dbPath = path.join(DATA_DIR, 'nad.db');
-    if (fs.existsSync(dbPath)) {
-        res.download(dbPath, `nad_backup_${new Date().toISOString().slice(0, 10)}.db`);
-    } else {
-        res.status(404).json({ error: 'Base de datos no encontrada' });
+    if (!fs.existsSync(dbPath)) {
+        return res.status(404).json({ error: 'Base de datos no encontrada' });
     }
+    const fecha = new Date().toISOString().slice(0, 10);
+    res.attachment(`nad_backup_${fecha}.zip`);
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.on('error', (err) => {
+        console.error('Error creando el respaldo:', err);
+        if (!res.headersSent) res.status(500).json({ error: 'Error al generar el respaldo' });
+    });
+    archive.pipe(res);
+    archive.file(dbPath, { name: 'nad.db' });
+    if (fs.existsSync(UPLOADS_DIR)) {
+        archive.directory(UPLOADS_DIR, 'uploads');
+    }
+    archive.finalize();
 });
 
 app.post(`/${ADMIN_PATH}/api/change-password`, requireAuth, async (req, res) => {
@@ -1218,6 +1288,7 @@ app.get('/sitemap.xml', (req, res) => {
     const DOMAIN = req.protocol + '://' + req.get('host');
     db.all('SELECT id FROM projects WHERE visible = 1', [], (err, rows) => {
         let urls = `<url><loc>${DOMAIN}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>
+<url><loc>${DOMAIN}/proyectos</loc><changefreq>weekly</changefreq><priority>0.9</priority></url>
 `;
         if (!err && rows) {
             rows.forEach(r => {

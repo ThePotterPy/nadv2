@@ -115,6 +115,34 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // Identifica la plataforma de un link para "Publicaciones Recientes" (ícono +
+    // color + nombre). Cualquier dominio no reconocido cae en un link genérico.
+    function detectPlatform(url) {
+        let host = '';
+        try { host = new URL(url).hostname.replace(/^www\./, ''); } catch (e) { }
+        if (host.includes('instagram.com')) return { name: 'Instagram', icon: 'fa-instagram', brand: true, color: '#E4405F' };
+        if (host.includes('facebook.com') || host.includes('fb.watch')) return { name: 'Facebook', icon: 'fa-facebook', brand: true, color: '#1877F2' };
+        if (host.includes('tiktok.com')) return { name: 'TikTok', icon: 'fa-tiktok', brand: true, color: '#111111' };
+        if (host.includes('twitter.com') || host.includes('x.com')) return { name: 'X', icon: 'fa-x-twitter', brand: true, color: '#111111' };
+        if (host.includes('linkedin.com')) return { name: 'LinkedIn', icon: 'fa-linkedin', brand: true, color: '#0A66C2' };
+        if (host.includes('youtube.com') || host.includes('youtu.be')) return { name: 'YouTube', icon: 'fa-youtube', brand: true, color: '#FF0000' };
+        return { name: host || 'enlace externo', icon: 'fa-link', brand: false, color: 'var(--primary)' };
+    }
+
+    // Tarjeta con estilo propio del sitio para un link a una publicación externa
+    // (reemplaza los widgets nativos de cada red, que son frágiles y no pegan
+    // visualmente con el resto del sitio).
+    function buildLinkCard(url) {
+        const p = detectPlatform(url);
+        const iconClass = (p.brand ? 'fa-brands ' : 'fa-solid ') + p.icon;
+        const safeUrl = safeHttpUrl(url) || '#';
+        return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" class="post-link-card">
+            <span class="post-link-icon" style="background:${p.color}"><i class="${iconClass}"></i></span>
+            <span class="post-link-text"><strong>Ver publicación</strong><small>en ${escapeHtml(p.name)}</small></span>
+            <i class="fa-solid fa-arrow-up-right-from-square post-link-arrow"></i>
+        </a>`;
+    }
+
     // ── Header, Scroll Progress & Parallax ──────────────────────────────────
     // En móvil el header ocupa mucho lugar: se esconde al bajar y reaparece
     // al subir, pero recién después de pasar HIDE_THRESHOLD (no desaparece
@@ -677,24 +705,29 @@ document.addEventListener('DOMContentLoaded', () => {
                             slide.style.alignItems = 'center';
                             slide.style.width = '100%';
 
+                            const isUploadedImage = src.match(/\.(jpeg|jpg|jfif|gif|png|webp|avif|bmp|svg)$/i);
+                            const isUploadedVideo = src.match(/\.(mp4|mov|webm)$/i);
+
                             if (src.includes('youtube.com') || src.includes('youtu.be')) {
                                 let embedUrl = src;
                                 if (src.includes('watch?v=')) embedUrl = src.replace('watch?v=', 'embed/');
                                 else if (src.includes('youtu.be/')) embedUrl = src.replace('youtu.be/', 'youtube.com/embed/');
                                 
-                                slide.innerHTML = `<iframe src="${embedUrl}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%; max-width:800px; aspect-ratio:16/9;"></iframe>`;
+                                slide.innerHTML = `<iframe src="${escapeHtml(embedUrl)}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%; max-width:800px; aspect-ratio:16/9;"></iframe>`;
                             } else if (src.includes('instagram.com')) {
                                 let permalink = src.split('?')[0];
                                 if (!permalink.endsWith('/')) permalink += '/';
                                 
                                 slide.innerHTML = `
-                                    <blockquote class="instagram-media" data-instgrm-permalink="${permalink}?utm_source=ig_embed&amp;utm_campaign=loading" data-instgrm-version="14" style=" background:#FFF; border:0; border-radius:3px; box-shadow:0 0 1px 0 rgba(0,0,0,0.5),0 1px 10px 0 rgba(0,0,0,0.15); margin: 1px; max-width:540px; min-width:326px; padding:0; width:99.375%; width:-webkit-calc(100% - 2px); width:calc(100% - 2px);">
+                                    <blockquote class="instagram-media" data-instgrm-permalink="${escapeHtml(permalink)}?utm_source=ig_embed&amp;utm_campaign=loading" data-instgrm-version="14" style=" background:#FFF; border:0; border-radius:3px; box-shadow:0 0 1px 0 rgba(0,0,0,0.5),0 1px 10px 0 rgba(0,0,0,0.15); margin: 1px; max-width:540px; min-width:326px; padding:0; width:99.375%; width:-webkit-calc(100% - 2px); width:calc(100% - 2px);">
                                     </blockquote>
                                 `;
-                                                        } else if (src.match(/\.(jpeg|jpg|gif|png|webp|avif|bmp|svg)$/i)) {
-                                slide.innerHTML = `<img src="${src}" alt="Publicación" class="post-media" style="box-shadow: 0 10px 30px rgba(0,0,0,0.1);">`;
+                            } else if (isUploadedImage) {
+                                slide.innerHTML = `<img src="${escapeHtml(src)}" alt="Publicación" class="post-media" style="box-shadow: 0 10px 30px rgba(0,0,0,0.1);">`;
+                            } else if (isUploadedVideo) {
+                                slide.innerHTML = `<video class="plyr-video post-media" src="${escapeHtml(src)}" playsinline controls></video>`;
                             } else {
-                                slide.innerHTML = `<video class="plyr-video post-media" src="${src}" playsinline controls></video>`;
+                                slide.innerHTML = buildLinkCard(src);
                             }
                             
                             swiperWrapper.appendChild(slide);
@@ -707,20 +740,12 @@ document.addEventListener('DOMContentLoaded', () => {
                         
                         // Wait a tick for DOM to update
                         setTimeout(() => {
-                            if (window.instgrm && window.instgrm.Embeds) {
-                                window.instgrm.Embeds.process();
-                            }
-
                             if (typeof Swiper !== 'undefined') {
                                 window.videoSwiperInstance = new Swiper('.video-swiper', {
                                     slidesPerView: 1,
                                     spaceBetween: 30,
                                     loop: false,
                                     autoHeight: true,
-                                    // El embed de Instagram se inserta de forma asíncrona (después de
-                                    // que Swiper ya midió la altura inicial), dejando el slide vacío.
-                                    // observer/observeParents hacen que Swiper vuelva a medir la altura
-                                    // cuando ese contenido aparece.
                                     observer: true,
                                     observeParents: true,
                                     navigation: {
@@ -731,16 +756,6 @@ document.addEventListener('DOMContentLoaded', () => {
                                 });
                             }
 
-                            // Instagram tarda en reemplazar el <blockquote> por el embed real;
-                            // reforzamos el recálculo de altura unas veces más mientras carga.
-                            [300, 800, 1500, 3000].forEach(delay => {
-                                setTimeout(() => {
-                                    if (window.videoSwiperInstance) {
-                                        window.videoSwiperInstance.updateAutoHeight();
-                                    }
-                                }, delay);
-                            });
-                            
                             // Inicializar Plyr
                             if (typeof Plyr !== 'undefined') {
                                 document.querySelectorAll('.plyr-video').forEach(vid => {
@@ -748,6 +763,38 @@ document.addEventListener('DOMContentLoaded', () => {
                                         controls: ['play-large', 'play', 'progress', 'current-time', 'mute', 'volume', 'fullscreen']
                                     });
                                 });
+                            }
+
+                            // ── Carga dinámica de SDKs sociales ──────────────
+                            const hasIG = swiperWrapper.querySelector('.instagram-media');
+                            function refreshSwiperHeight() {
+                                [100, 500, 1500, 3000].forEach(d => {
+                                    setTimeout(() => {
+                                        if (window.videoSwiperInstance) {
+                                            window.videoSwiperInstance.updateAutoHeight();
+                                        }
+                                    }, d);
+                                });
+                            }
+
+                            if (hasIG) {
+                                if (window.instgrm && window.instgrm.Embeds) {
+                                    window.instgrm.Embeds.process();
+                                    refreshSwiperHeight();
+                                } else {
+                                    const s = document.createElement('script');
+                                    s.src = 'https://www.instagram.com/embed.js';
+                                    s.async = true;
+                                    s.onload = () => {
+                                        if (window.instgrm && window.instgrm.Embeds) {
+                                            window.instgrm.Embeds.process();
+                                            refreshSwiperHeight();
+                                        }
+                                    };
+                                    document.body.appendChild(s);
+                                }
+                            } else {
+                                refreshSwiperHeight();
                             }
                         }, 50);
                     }
