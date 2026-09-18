@@ -19,7 +19,8 @@ const PORT = process.env.PORT || 3000;
 app.set('trust proxy', 1);
 
 // ── Ruta secreta del panel admin ─────────────────────────────────────────────
-const ADMIN_PATH = process.env.ADMIN_PATH || 'gestion-nad-2026';
+const rawAdminPath = (process.env.ADMIN_PATH || 'gestion-nad-2026').trim().replace(/['"]/g, '').replace(/^\/+|\/+$/g, '');
+const ADMIN_PATH = rawAdminPath || 'gestion-nad-2026';
 
 // ── Directorios y Persistencia (Soporte de Railway Volume) ────────────────────
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -933,12 +934,12 @@ app.get('/api/content', async (req, res) => {
 });
 
 // ── Rutas del Panel Admin (Ruta secreta) ────────────────────────────────────
-app.get(`/${ADMIN_PATH}/login`, (req, res) => {
+app.get([`/${ADMIN_PATH}/login`, `/${ADMIN_PATH}/login/`], (req, res) => {
     if (req.session.admin) return res.redirect(`/${ADMIN_PATH}`);
     res.sendFile(path.join(__dirname, 'admin', 'login.html'));
 });
 
-app.post(`/${ADMIN_PATH}/login`, requireSameOrigin, async (req, res) => {
+app.post([`/${ADMIN_PATH}/login`, `/${ADMIN_PATH}/login/`], requireSameOrigin, async (req, res) => {
     const ip = req.ip || req.connection.remoteAddress;
     try {
         const limit = await checkRateLimit(ip);
@@ -980,7 +981,7 @@ app.post(`/${ADMIN_PATH}/logout`, requireAuth, requireSameOrigin, (req, res) => 
     });
 });
 
-app.get(`/${ADMIN_PATH}`, requireAuth, (req, res) => {
+app.get([`/${ADMIN_PATH}`, `/${ADMIN_PATH}/`], requireAuth, (req, res) => {
     res.sendFile(path.join(__dirname, 'admin', 'index.html'));
 });
 
