@@ -506,7 +506,7 @@ textarea{resize:vertical;min-height:90px;line-height:1.5}
 <script src="/escape-html.js"></script>
 <script>
 const ps=window.location.pathname.split('/').filter(p=>p&&p!=='index.html');
-const adm=ps[0]||'gestion-nad-2026';
+const adm=ps[0]||'gestion-nad-admin-nosequeponer';
 const PANEL='/'+adm,API=PANEL+'/api';
 const le=document.getElementById('logout-btn');if(le){le.href='#';le.addEventListener('click',async e=>{e.preventDefault();try{const r=await fetch(PANEL+'/logout',{method:'POST'});if(!r.ok)throw new Error('No se pudo cerrar la sesión');window.location.href=PANEL+'/login';}catch(err){showToast(err.message||'Error al cerrar sesión','error');}});}
 const be=document.getElementById('btn-backup-db');if(be)be.href=API+'/backup-db';

@@ -59,6 +59,6 @@ if (adminPassword && (adminPassword.length < 12 || knownWeakAdminPasswords.has(a
     process.exit(1);
 }
 
-if (!process.env.ADMIN_PATH || process.env.ADMIN_PATH === 'gestion-nad-2026') {
-    console.warn('⚠️  Recomendación: configurá ADMIN_PATH con una ruta administrativa no predecible.');
+if (!process.env.ADMIN_PATH || process.env.ADMIN_PATH === 'gestion-nad-2026' || process.env.ADMIN_PATH === 'reemplazar-por-ruta-admin-no-predecible') {
+    console.warn('⚠️  Recomendación: configurá ADMIN_PATH con una ruta administrativa propia (ej: gestion-nad-admin-nosequeponer).');
 }

@@ -19,8 +19,10 @@ const PORT = process.env.PORT || 3000;
 app.set('trust proxy', true);
 
 // ── Ruta secreta del panel admin ─────────────────────────────────────────────
-const rawAdminPath = (process.env.ADMIN_PATH || 'gestion-nad-2026').trim().replace(/['"]/g, '').replace(/^\/+|\/+$/g, '');
-const ADMIN_PATH = rawAdminPath || 'gestion-nad-2026';
+const rawAdminPath = (process.env.ADMIN_PATH || 'gestion-nad-admin-nosequeponer').trim().replace(/['"]/g, '').replace(/^\/+|\/+$/g, '');
+const ADMIN_PATH = (!rawAdminPath || rawAdminPath === 'reemplazar-por-ruta-admin-no-predecible' || rawAdminPath === 'gestion-nad-2026')
+    ? 'gestion-nad-admin-nosequeponer'
+    : rawAdminPath;
 
 // ── Directorios y Persistencia (Soporte de Railway Volume) ────────────────────
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
