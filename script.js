@@ -491,20 +491,25 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (siteLogo) siteLogo.src = images.logo;
                     if (footerLogo) footerLogo.src = images.logo;
                 }
-                if (images.hero_bg) {
-                    const heroBg = document.getElementById('cms-hero-bg');
-                    if (heroBg) heroBg.style.backgroundImage = `url('${images.hero_bg}')`;
-                }
-                
-                if (images.hero_slider && Array.isArray(images.hero_slider) && images.hero_slider.length > 0) {
-                    const heroSlider = document.getElementById('hero-slider');
-                    const cmsHeroBg = document.getElementById('cms-hero-bg');
+                const validSlider = (images.hero_slider && Array.isArray(images.hero_slider))
+                    ? images.hero_slider.map(safeMediaUrl).filter(Boolean)
+                    : [];
+
+                const heroSlider = document.getElementById('hero-slider');
+                const cmsHeroBg = document.getElementById('cms-hero-bg');
+
+                if (validSlider.length > 0) {
+                    if (cmsHeroBg) {
+                        cmsHeroBg.style.backgroundImage = `url('${validSlider[0]}')`;
+                    }
                     if (heroSlider) {
+                        // Limpiar slides viejos adicionales
                         Array.from(heroSlider.children).forEach(child => {
                             if (child !== cmsHeroBg) child.remove();
                         });
                         
-                        images.hero_slider.map(safeMediaUrl).filter(Boolean).forEach((imgSrc) => {
+                        // Añadir los siguientes slides a partir del índice 1
+                        validSlider.slice(1).forEach((imgSrc) => {
                             const slide = document.createElement('div');
                             slide.className = 'hero-bg slide';
                             slide.style.backgroundImage = `url('${imgSrc}')`;
@@ -522,6 +527,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             }, 4000);
                         }
                     }
+                } else if (images.hero_bg && cmsHeroBg) {
+                    cmsHeroBg.style.backgroundImage = `url('${images.hero_bg}')`;
                 }
                 if (images.about_image) {
                     const aboutImg = document.getElementById('cms-about-image');

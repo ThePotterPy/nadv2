@@ -587,6 +587,38 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
         const stylesData = config ? config.styles : null;
         let html = getHtmlTemplate(filename);
 
+        // Inyectar imágenes del CMS para evitar FOUC y flashes de imágenes por defecto
+        const sliderImgs = (config && config.images && Array.isArray(config.images.hero_slider) && config.images.hero_slider.length > 0)
+            ? config.images.hero_slider.map(safePublicMediaUrl).filter(Boolean)
+            : [];
+        const firstHeroImg = sliderImgs[0] || (config && config.images && safePublicMediaUrl(config.images.hero_bg)) || '';
+
+        let heroImageCss = '';
+        if (firstHeroImg) {
+            html = html.replace(
+                '<div class="hero-bg slide active" id="cms-hero-bg"></div>',
+                `<div class="hero-bg slide active" id="cms-hero-bg" style="background-image: url('${escapeHtml(firstHeroImg)}');"></div>`
+            );
+            const preloadTag = `<link rel="preload" as="image" href="${escapeHtml(firstHeroImg)}" fetchpriority="high">`;
+            html = html.replace('</head>', `    ${preloadTag}\n</head>`);
+            heroImageCss = `#cms-hero-bg, .hero-bg.active { background-image: url('${firstHeroImg}') !important; }`;
+        }
+
+        if (config && config.images && config.images.cta_bg) {
+            const ctaBg = safePublicMediaUrl(config.images.cta_bg);
+            if (ctaBg) {
+                heroImageCss += ` .cta-section { background-image: url('${ctaBg}') !important; }`;
+            }
+        }
+
+        if (config && config.images && config.images.logo) {
+            const logoUrl = safePublicMediaUrl(config.images.logo);
+            if (logoUrl) {
+                html = html.replace('src="nad.png" alt="NAD Constructora Logo" id="site-logo"', `src="${escapeHtml(logoUrl)}" alt="NAD Constructora Logo" id="site-logo"`);
+                html = html.replace('src="nad.png" alt="NAD Constructora Logo" class="footer-logo" id="cms-footer-logo"', `src="${escapeHtml(logoUrl)}" alt="NAD Constructora Logo" class="footer-logo" id="cms-footer-logo"`);
+            }
+        }
+
         // Inyectar estilos globales
             if (stylesData) {
                 let sectionCss = '';
@@ -669,8 +701,11 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
                         ${stylesData.color_accent_light ? '--accent-light:' + stylesData.color_accent_light + ';' : ''}
                     }
                     ${sectionCss}
+                    ${heroImageCss}
                 </style>`;
                 html = html.replace('</head>', `${dynamicStyle}\n</head>`);
+            } else if (heroImageCss) {
+                html = html.replace('</head>', `<style>${heroImageCss}</style>\n</head>`);
             }
 
             if (metaOverride.title) {
