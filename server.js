@@ -428,6 +428,7 @@ function deleteUploadFile(fileUrl) {
 // ── Middleware ───────────────────────────────────────────────────────────────
 app.use(compression());
 app.use(helmet({
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
     contentSecurityPolicy: {
         useDefaults: true,
         directives: {
