@@ -299,6 +299,33 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── Modal de Proyectos con Soporte de Video e Imagen ───────────────────
     const modalVideo = document.getElementById('modal-video');
 
+    // ── Formateador de descripción para listas y saltos de fila ─────────────
+    function formatProjectDescription(raw) {
+        if (!raw) return '';
+        let t = String(raw).trim().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const lines = t.split('\n');
+        const processed = [];
+        for (let line of lines) {
+            let trimmed = line.trim();
+            if (!trimmed) {
+                processed.push('');
+                continue;
+            }
+            const hasMultipleDashes = (trimmed.match(/\s+[-•*](?:\s*)(?=[A-Za-z\u00C0-\u017F])/g) || []).length >= 2;
+            if (/^[-•*]/.test(trimmed) || hasMultipleDashes) {
+                if (!/^[-•*]/.test(trimmed) && hasMultipleDashes) {
+                    trimmed = '- ' + trimmed;
+                }
+                trimmed = trimmed.replace(/\s+([-•*])(?:\s*)(?=[A-Za-z\u00C0-\u017F])/g, '\n$1 ');
+                trimmed = trimmed.replace(/^([-•*])(?=[A-Za-z\u00C0-\u017F])/gm, '$1 ');
+                processed.push(trimmed);
+            } else {
+                processed.push(line);
+            }
+        }
+        return processed.join('\n').trim();
+    }
+
     function openModal(btn) {
         if (!modal) return;
         lastModalFocus = document.activeElement;
@@ -326,9 +353,16 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        let rawDesc = '';
+        if (btn.dataset.id && window.__nadProjectsById && window.__nadProjectsById[btn.dataset.id]) {
+            rawDesc = window.__nadProjectsById[btn.dataset.id].description || '';
+        } else {
+            rawDesc = btn.dataset.desc || '';
+        }
+
         modalTitle.textContent = btn.dataset.title || '';
         modalCat.textContent   = btn.dataset.category || '';
-        modalDesc.textContent  = btn.dataset.desc || '';
+        modalDesc.textContent  = formatProjectDescription(rawDesc);
         modalLoc.textContent   = btn.dataset.location || '';
         modalYear.textContent  = btn.dataset.year || '';
 
@@ -819,6 +853,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const projects = await res.json();
             if (!Array.isArray(projects) || projects.length === 0) return;
 
+            window.__nadProjectsById = {};
+            projects.forEach(p => {
+                if (p && p.id) window.__nadProjectsById[p.id] = p;
+            });
+
             // Separar entre Destacados y Adicionales
             let featured = [];
             let extra    = [];
@@ -851,9 +890,10 @@ document.addEventListener('DOMContentLoaded', () => {
                         ${mediaElement}
                         <div class="project-overlay">
                             <button class="project-link open-modal-btn"
+                                data-id="${p.id}"
                                 data-title="${escapeHtml(p.title)}"
                                 data-category="${escapeHtml(p.category)}"
-                                data-desc="${escapeHtml(p.description)}"
+                                data-desc="${escapeHtml((p.description || '').replace(/\r\n|\r|\n/g, '&#10;'))}"
                                 data-location="${escapeHtml(p.location)}"
                                 data-year="${p.year}"
                                 data-image="${p.image}"

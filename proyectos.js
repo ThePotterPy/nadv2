@@ -307,6 +307,33 @@ function escapeHtml(str) {
         .replace(/'/g, '&#039;');
 }
 
+// ── Formateador de descripción para listas y saltos de fila ─────────────
+function formatProjectDescription(raw) {
+    if (!raw) return '';
+    let t = String(raw).trim().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const lines = t.split('\n');
+    const processed = [];
+    for (let line of lines) {
+        let trimmed = line.trim();
+        if (!trimmed) {
+            processed.push('');
+            continue;
+        }
+        const hasMultipleDashes = (trimmed.match(/\s+[-•*](?:\s*)(?=[A-Za-z\u00C0-\u017F])/g) || []).length >= 2;
+        if (/^[-•*]/.test(trimmed) || hasMultipleDashes) {
+            if (!/^[-•*]/.test(trimmed) && hasMultipleDashes) {
+                trimmed = '- ' + trimmed;
+            }
+            trimmed = trimmed.replace(/\s+([-•*])(?:\s*)(?=[A-Za-z\u00C0-\u017F])/g, '\n$1 ');
+            trimmed = trimmed.replace(/^([-•*])(?=[A-Za-z\u00C0-\u017F])/gm, '$1 ');
+            processed.push(trimmed);
+        } else {
+            processed.push(line);
+        }
+    }
+    return processed.join('\n').trim();
+}
+
 // Lógica del Modal de Proyecto
 function openProjectModal(id) {
     const p = loadedProjects.find(x => x.id === id);
@@ -317,7 +344,7 @@ function openProjectModal(id) {
     document.getElementById('pm-year').textContent = p.year;
     document.getElementById('pm-title').textContent = p.title;
     document.getElementById('pm-location').textContent = p.location;
-    document.getElementById('pm-description').textContent = p.description; // usa pre-line
+    document.getElementById('pm-description').textContent = formatProjectDescription(p.description || ''); // usa pre-line
 
     const wMessage = encodeURIComponent(`Hola NAD, tengo un proyecto similar a "${p.title}" en mente. ¿Podemos agendar una reunión?`);
     

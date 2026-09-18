@@ -1121,7 +1121,7 @@ header:not(.scrolled) .mobile-menu-btn {
 }
 
 .modal-container {
-    background: var(--bg-light);
+    background: #FFFFFF !important;
     border-radius: 20px;
     width: fit-content;
     max-width: 95vw;
@@ -1144,8 +1144,8 @@ header:not(.scrolled) .mobile-menu-btn {
     position: absolute;
     top: 1.2rem;
     right: 1.2rem;
-    background: rgba(255, 255, 255, 0.9);
-    border: 1px solid rgba(0, 0, 0, 0.1);
+    background: #FFFFFF;
+    border: 1px solid rgba(0, 0, 0, 0.08);
     width: 48px;
     height: 48px;
     border-radius: 50%;
@@ -1157,7 +1157,7 @@ header:not(.scrolled) .mobile-menu-btn {
     color: var(--primary-dark);
     z-index: 20;
     transition: transform var(--transition-fast), background-color var(--transition-fast), color var(--transition-fast);
-    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
 }
 
 .modal-close:hover {
@@ -1206,7 +1206,7 @@ header:not(.scrolled) .mobile-menu-btn {
     height: 100%;
     width: 500px;
     flex-shrink: 0;
-    background: var(--bg-light);
+    background: #FFFFFF !important;
 }
 
 .modal-info-body {
@@ -1226,12 +1226,14 @@ header:not(.scrolled) .mobile-menu-btn {
     line-height: 1.25;
 }
 
-.modal-info p {
-    color: var(--text-muted);
+.modal-info p,
+#modal-desc {
+    color: #374151;
     font-size: 0.98rem;
     margin-bottom: 1.5rem;
-    line-height: 1.65;
+    line-height: 1.75;
     word-break: break-word;
+    white-space: pre-line;
 }
 
 .modal-details {
@@ -1246,15 +1248,14 @@ header:not(.scrolled) .mobile-menu-btn {
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    color: var(--primary-dark);
-    font-weight: 500;
+    color: #1f2937;
+    font-weight: 600;
     font-size: 0.92rem;
 }
 
 .detail-item i, .detail-item svg {
-    color: var(--accent-1);
+    color: var(--primary, #c1121f);
 }
-
 
 /* Hero Label */
 .hero-label {
