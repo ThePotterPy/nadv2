@@ -16,7 +16,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ── Soporte de Proxy para Railway (Cloudflare / Envoy) ───────────────────────
-app.set('trust proxy', 1);
+app.set('trust proxy', true);
 
 // ── Ruta secreta del panel admin ─────────────────────────────────────────────
 const rawAdminPath = (process.env.ADMIN_PATH || 'gestion-nad-2026').trim().replace(/['"]/g, '').replace(/^\/+|\/+$/g, '');
@@ -867,13 +867,37 @@ function requireAuth(req, res, next) {
 }
 
 function requireSameOrigin(req, res, next) {
-    const expectedOrigin = req.protocol + '://' + req.get('host');
     const origin = req.get('origin');
     const referer = req.get('referer');
+    const source = origin || referer;
+
+    if (!source) {
+        return res.status(403).json({ error: 'Origen de solicitud no permitido' });
+    }
 
     try {
-        if (origin && new URL(origin).origin === expectedOrigin) return next();
-        if (!origin && referer && new URL(referer).origin === expectedOrigin) return next();
+        const sourceUrl = new URL(source);
+        const sourceHost = sourceUrl.host.toLowerCase();
+        const sourceHostname = sourceUrl.hostname.toLowerCase();
+
+        const hostHeader = (req.get('host') || '').toLowerCase();
+        const xForwardedHost = (req.get('x-forwarded-host') || '').toLowerCase();
+
+        const validHostnames = [
+            hostHeader.split(':')[0],
+            xForwardedHost.split(':')[0],
+            'localhost',
+            '127.0.0.1'
+        ].filter(Boolean);
+
+        if (validHostnames.includes(sourceHostname) || sourceHost === hostHeader || (xForwardedHost && sourceHost === xForwardedHost)) {
+            return next();
+        }
+
+        const expectedOrigin = req.protocol + '://' + req.get('host');
+        if (sourceUrl.origin === expectedOrigin) {
+            return next();
+        }
     } catch (err) { }
 
     return res.status(403).json({ error: 'Origen de solicitud no permitido' });
