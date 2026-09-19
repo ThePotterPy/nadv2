@@ -614,8 +614,8 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
         if (config && config.images && config.images.logo) {
             const logoUrl = safePublicMediaUrl(config.images.logo);
             if (logoUrl) {
-                html = html.replace('src="nad.png" alt="NAD Constructora Logo" id="site-logo"', `src="${escapeHtml(logoUrl)}" alt="NAD Constructora Logo" id="site-logo"`);
-                html = html.replace('src="nad.png" alt="NAD Constructora Logo" class="footer-logo" id="cms-footer-logo"', `src="${escapeHtml(logoUrl)}" alt="NAD Constructora Logo" class="footer-logo" id="cms-footer-logo"`);
+                html = html.replace(/src="\/?nad\.png" alt="NAD Constructora Logo" id="site-logo"/, `src="${escapeHtml(logoUrl)}" alt="NAD Constructora Logo" id="site-logo"`);
+                html = html.replace(/src="\/?nad\.png" alt="NAD Constructora Logo" class="footer-logo" id="cms-footer-logo"/, `src="${escapeHtml(logoUrl)}" alt="NAD Constructora Logo" class="footer-logo" id="cms-footer-logo"`);
             }
         }
 
