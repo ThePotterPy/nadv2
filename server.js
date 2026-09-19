@@ -601,7 +601,7 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
             );
             const preloadTag = `<link rel="preload" as="image" href="${escapeHtml(firstHeroImg)}" fetchpriority="high">`;
             html = html.replace('</head>', `    ${preloadTag}\n</head>`);
-            heroImageCss = `#cms-hero-bg, .hero-bg.active { background-image: url('${firstHeroImg}') !important; }`;
+            heroImageCss = `#cms-hero-bg { background-image: url('${firstHeroImg}') !important; }`;
         }
 
         if (config && config.images && config.images.cta_bg) {
