@@ -6,24 +6,29 @@
   "scripts": {
     "start": "node -r ./security-bootstrap.js server.js",
     "dev": "nodemon server.js",
-    "check": "node --check server.js && node --check script.js && node --check proyectos.js && node --check security-bootstrap.js && node --check lib/security-config.js && node --check lib/sqlite-session-store.js && node --check escape-html.js"
+    "check": "node --check server.js && node --check script.js && node --check proyectos.js && node --check security-bootstrap.js && node --check lib/security-config.js && node --check lib/sqlite-session-store.js && node --check lib/content-validation.js && node --check lib/database-migrations.js && node --check lib/backup.js && node --check test/regression.test.js && node --check escape-html.js",
+    "test": "node --test --test-reporter=spec test/regression.test.js"
   },
   "dependencies": {
+    "@fortawesome/fontawesome-free": "6.4.0",
     "archiver": "^7.0.1",
     "bcryptjs": "^2.4.3",
     "compression": "^1.8.1",
     "express": "^4.18.2",
     "express-session": "^1.17.3",
     "helmet": "^8.3.0",
+    "lucide": "0.544.0",
     "multer": "^2.0.0",
+    "plyr": "3.7.8",
     "sharp": "^0.35.4",
-    "sqlite3": "^6.0.1"
+    "sqlite3": "^6.0.1",
+    "swiper": "10.3.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20 <25"
   },
   "allowScripts": {
     "sqlite3@6.0.1": true

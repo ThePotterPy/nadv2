@@ -30,6 +30,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const modalYear  = document.getElementById('modal-year');
     const modalCta   = document.getElementById('modal-cta-btn');
     let lastModalFocus = null;
+    if (modalImg) {
+        modalImg.addEventListener('error', () => {
+            if (!modalImg.src.endsWith('/nad.png')) modalImg.src = '/nad.png';
+        });
+    }
 
     // Lógica para compartir
     const shareBtn = document.getElementById('modal-share-btn');
@@ -519,7 +524,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (window.heroSliderInterval) clearInterval(window.heroSliderInterval);
                         const slides = heroSlider.querySelectorAll('.slide');
                         let currentSlide = 0;
-                        if (slides.length > 1) {
+                        if (slides.length > 1 && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
                             window.heroSliderInterval = setInterval(() => {
                                 slides[currentSlide].classList.remove('active');
                                 currentSlide = (currentSlide + 1) % slides.length;
@@ -579,7 +584,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         // Multiplicar logos si son muy pocos para que cubran toda la pantalla
                         if (logosToRender.length > 0) {
                             while (logosToRender.length < 12) {
-                                logosToRender = logosToRender.concat(images.clients_logos);
+                                logosToRender = logosToRender.concat(images.clients_logos.map(safeMediaUrl).filter(Boolean));
                             }
                         }
 
@@ -671,7 +676,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Proyectos Títulos
                 setText('cms-projects-title', texts.projects_title);
                 setText('cms-projects-subtitle', texts.projects_subtitle);
-                if (btnText && !btnVerMas?.getAttribute('aria-expanded') === 'true') {
+                if (btnText && btnVerMas?.getAttribute('aria-expanded') !== 'true') {
                     btnText.textContent = texts.btn_ver_mas || 'Ver más proyectos';
                 }
 
@@ -886,10 +891,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Generador de HTML de tarjeta con soporte de video y lazy loading
             function createCardHtml(p, idx, isExtra = false) {
-                const isVideo = /\.(mp4|webm|mov)$/i.test(p.image);
+                const safeImage = safeMediaUrl(p.image) || '/nad.png';
+                const isVideo = /\.(mp4|webm|mov)(?:$|\?)/i.test(safeImage);
                 const mediaElement = isVideo
-                    ? `<video src="${p.image}" muted loop playsinline onmouseover="this.play()" onmouseout="this.pause()" style="width:100%;height:100%;object-fit:cover;"></video>`
-                    : `<img src="${p.image}" alt="${escapeHtml(p.title)}" onerror="this.src='/nad.png'" loading="lazy" decoding="async">`;
+                    ? `<video src="${escapeHtml(safeImage)}" muted loop playsinline style="width:100%;height:100%;object-fit:cover;"></video>`
+                    : `<img src="${escapeHtml(safeImage)}" alt="${escapeHtml(p.title)}" onerror="this.src='/nad.png'" loading="lazy" decoding="async">`;
 
                 return `
                 <div class="project-card ${isExtra ? 'project-extra-card' : 'fade-up delay-' + ((idx % 3) + 1)} visible" data-year="${p.year}">
@@ -903,7 +909,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 data-desc="${escapeHtml((p.description || '').replace(/\r\n|\r|\n/g, '&#10;'))}"
                                 data-location="${escapeHtml(p.location)}"
                                 data-year="${p.year}"
-                                data-image="${p.image}"
+                                data-image="${escapeHtml(safeImage)}"
                                 aria-label="Ver detalles del proyecto ${escapeHtml(p.title)}">
                                 <i data-lucide="arrow-up-right"></i>
                             </button>

@@ -4,6 +4,13 @@ document.addEventListener('DOMContentLoaded', () => {
     safeCreateIcons();
     loadSiteContent();
     loadAndRenderProjects();
+
+    document.querySelectorAll('[data-project-filter]').forEach((button) => {
+        button.addEventListener('click', () => filterProjectsView(button.dataset.projectFilter, button));
+    });
+    document.querySelectorAll('[data-view-mode]').forEach((button) => {
+        button.addEventListener('click', () => setViewMode(button.dataset.viewMode, button));
+    });
     
     // Esta página no tiene foto de hero: el header arranca sólido (clase
     // "scrolled" fija en el HTML) y debe quedarse así siempre. A diferencia
@@ -105,8 +112,7 @@ async function loadAndRenderProjects() {
 
         // Actualizar botón activo en el header de filtros
         document.querySelectorAll('.filter-btn').forEach(btn => {
-            const attr = btn.getAttribute('onclick') || '';
-            btn.classList.toggle('active', attr.includes(`'${defaultFilter}'`));
+            btn.classList.toggle('active', btn.dataset.projectFilter === defaultFilter);
         });
 
         renderProjectsList(defaultFilter);
@@ -126,11 +132,7 @@ async function loadAndRenderProjects() {
 
 function filterProjectsView(type, btn) {
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-    if (btn) {
-        btn.classList.add('active');
-    } else if (window.event && window.event.target) {
-        window.event.target.classList.add('active');
-    }
+    if (btn) btn.classList.add('active');
     renderProjectsList(type);
 }
 
@@ -198,8 +200,6 @@ function renderProjectsList(filterType) {
                 }
             });
 
-            const wMessage = encodeURIComponent(`Hola NAD, tengo un proyecto similar a "${p.title}" en mente. ¿Podemos agendar una reunión?`);
-
             html += `
                 <div class="project-block ${isReverse}">
                     <div class="project-media">
@@ -220,7 +220,7 @@ function renderProjectsList(filterType) {
                             <span class="meta-badge"><i data-lucide="map-pin" style="width:14px;height:14px;"></i> <span>${escapeHtml(p.location)}</span></span>
                         </div>
                         <h2 class="project-title">${escapeHtml(p.title)}</h2>
-                        <p class="project-desc" style="display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;">${escapeHtml(p.description)}</p>
+                        <p class="project-desc">${escapeHtml(p.description)}</p>
 
                         <span class="btn btn-primary" style="align-self:flex-start;">
                             <i data-lucide="layout-grid"></i> <span>Ver proyecto completo</span>
@@ -305,127 +305,4 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
-}
-
-// ── Formateador de descripción para listas y saltos de fila ─────────────
-function formatProjectDescription(raw) {
-    if (!raw) return '';
-    let t = String(raw).trim().replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const lines = t.split('\n');
-    const processed = [];
-    for (let line of lines) {
-        let trimmed = line.trim();
-        if (!trimmed) {
-            processed.push('');
-            continue;
-        }
-        const hasMultipleDashes = (trimmed.match(/\s+[-•*](?:\s*)(?=[A-Za-z\u00C0-\u017F])/g) || []).length >= 2;
-        if (/^[-•*]/.test(trimmed) || hasMultipleDashes) {
-            if (!/^[-•*]/.test(trimmed) && hasMultipleDashes) {
-                trimmed = '- ' + trimmed;
-            }
-            trimmed = trimmed.replace(/\s+([-•*])(?:\s*)(?=[A-Za-z\u00C0-\u017F])/g, '\n$1 ');
-            trimmed = trimmed.replace(/^([-•*])(?=[A-Za-z\u00C0-\u017F])/gm, '$1 ');
-            processed.push(trimmed);
-        } else {
-            processed.push(line);
-        }
-    }
-    return processed.join('\n').trim();
-}
-
-// Lógica del Modal de Proyecto
-function openProjectModal(id) {
-    const p = loadedProjects.find(x => x.id === id);
-    if (!p) return;
-
-    document.getElementById('pm-header').style.backgroundImage = `url('${p.image}')`;
-    document.getElementById('pm-category').textContent = p.category;
-    document.getElementById('pm-year').textContent = p.year;
-    document.getElementById('pm-title').textContent = p.title;
-    document.getElementById('pm-location').textContent = p.location;
-    document.getElementById('pm-description').textContent = formatProjectDescription(p.description || ''); // usa pre-line
-
-    const wMessage = encodeURIComponent(`Hola NAD, tengo un proyecto similar a "${p.title}" en mente. ¿Podemos agendar una reunión?`);
-    
-    const pmShareBtn = document.getElementById('pm-share-btn');
-    if (pmShareBtn) {
-        pmShareBtn.onclick = () => {
-            if (navigator.share) {
-                navigator.share({
-                    title: p.title,
-                    url: window.location.origin + '/proyecto/' + p.id
-                }).catch(err => console.error(err));
-            } else {
-                navigator.clipboard.writeText(window.location.origin + '/proyecto/' + p.id);
-                alert('Enlace copiado al portapapeles');
-            }
-        };
-    }
-
-    document.getElementById('pm-cta-btn').href = `https://wa.me/595981076445?text=${wMessage}`;
-
-    // Galería extra
-    const galleryGrid = document.getElementById('pm-gallery-grid');
-    const gallerySection = document.getElementById('pm-gallery-section');
-    galleryGrid.innerHTML = '';
-    
-    const allMedia = getProjectMedia(p);
-
-    if (allMedia.length > 1) {
-        gallerySection.style.display = 'block';
-        allMedia.forEach(url => {
-            const safeUrl = escapeHtml(url);
-            const isVideo = /\.(mp4|webm|mov)$/i.test(url);
-            if (isVideo) {
-                galleryGrid.innerHTML += `<video src="${safeUrl}" controls class="pm-gallery-img"></video>`;
-            } else {
-                const img = document.createElement('img');
-                img.src = url;
-                img.alt = 'Galería';
-                img.className = 'pm-gallery-img';
-                img.loading = 'lazy';
-                img.addEventListener('click', () => openLightbox(url));
-                galleryGrid.appendChild(img);
-            }
-        });
-    } else {
-        gallerySection.style.display = 'none';
-    }
-
-    // Forzar renderizado previo al inicio de la animación para evitar saltos (layout thrashing)
-    const modal = document.getElementById('project-detail-modal');
-    modal.style.display = 'flex';
-    requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-            modal.classList.add('active');
-            document.body.style.overflow = 'hidden'; // prevenir scroll fondo
-        });
-    });
-}
-
-function closeProjectModal() {
-    const modal = document.getElementById('project-detail-modal');
-    modal.classList.remove('active');
-    document.body.style.overflow = '';
-    setTimeout(() => {
-        if (!modal.classList.contains('active')) {
-            modal.style.display = 'none';
-        }
-    }, 400); // coincide con la duración de transition en CSS (0.4s)
-}
-
-// Cierra modal al tocar fondo oscuro
-document.getElementById('project-detail-modal')?.addEventListener('click', function(e) {
-    if (e.target === this) closeProjectModal();
-});
-
-// Lightbox
-function openLightbox(url) {
-    document.getElementById('lightbox-img').src = url;
-    document.getElementById('lightbox').classList.add('active');
-}
-
-function closeLightbox() {
-    document.getElementById('lightbox').classList.remove('active');
 }

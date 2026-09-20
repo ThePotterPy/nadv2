@@ -5,43 +5,63 @@ const bcrypt = require('bcryptjs');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const compression = require('compression');
 const helmet = require('helmet');
 const sharp = require('sharp');
 const archiver = require('archiver');
 const { getSessionSecret, getInitialAdminPassword, isProductionEnvironment } = require('./lib/security-config');
 const SQLiteSessionStore = require('./lib/sqlite-session-store');
+const { initializeDatabase, dbGet: migrationDbGet, dbAll: migrationDbAll, dbRun: migrationDbRun } = require('./lib/database-migrations');
+const { ContentValidationError, validateContentPatch } = require('./lib/content-validation');
+const { prepareBackup } = require('./lib/backup');
+
+sharp.concurrency(Math.max(1, Math.min(2, Number.parseInt(process.env.SHARP_CONCURRENCY || '2', 10) || 2)));
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const SITE_URL = (() => {
+    const raw = String(process.env.SITE_URL || '').trim().replace(/\/$/, '');
+    if (!raw) return '';
+    try {
+        const parsed = new URL(raw);
+        if (parsed.protocol === 'https:' || (!isProductionEnvironment() && parsed.protocol === 'http:')) return parsed.origin;
+    } catch (error) { }
+    throw new Error('SITE_URL debe ser un origen HTTPS válido, sin rutas adicionales');
+})();
 
-// ── Soporte de Proxy para Railway (Cloudflare / Envoy) ───────────────────────
-app.set('trust proxy', true);
+function publicOrigin(req) {
+    return SITE_URL || `${req.protocol}://${req.get('host')}`;
+}
+
+// Railway agrega un salto de proxy. Confiar en una cantidad concreta evita que
+// el cliente elija libremente req.ip mediante X-Forwarded-For.
+const TRUST_PROXY_HOPS = Number.parseInt(process.env.TRUST_PROXY_HOPS || '1', 10);
+app.set('trust proxy', Number.isInteger(TRUST_PROXY_HOPS) && TRUST_PROXY_HOPS >= 0 ? TRUST_PROXY_HOPS : 1);
 
 // ── Ruta secreta del panel admin ─────────────────────────────────────────────
 const rawAdminPath = (process.env.ADMIN_PATH || 'gestion-nad-admin-nosequeponer').trim().replace(/['"]/g, '').replace(/^\/+|\/+$/g, '');
-const ADMIN_PATH = (!rawAdminPath || rawAdminPath === 'reemplazar-por-ruta-admin-no-predecible' || rawAdminPath === 'gestion-nad-2026')
+const ADMIN_PATH = (!/^[a-zA-Z0-9_-]{8,100}$/.test(rawAdminPath) || rawAdminPath === 'reemplazar-por-ruta-admin-no-predecible' || rawAdminPath === 'gestion-nad-2026')
     ? 'gestion-nad-admin-nosequeponer'
     : rawAdminPath;
 
 // ── Directorios y Persistencia (Soporte de Railway Volume) ────────────────────
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(DATA_DIR, 'uploads');
+const DATABASE_PATH = path.join(DATA_DIR, 'nad.db');
+const DATABASE_WAS_PRESENT = fs.existsSync(DATABASE_PATH) && fs.statSync(DATABASE_PATH).size > 0;
+const PERSISTENT_STORAGE_CONFIGURED = Boolean(process.env.DATA_DIR) || !isProductionEnvironment() || process.env.ALLOW_EPHEMERAL_DATA === 'true';
 
 [DATA_DIR, UPLOADS_DIR, path.join(__dirname, 'public', 'uploads')].forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
 // ── Base de datos SQLite ─────────────────────────────────────────────────────
-const db = new sqlite3.Database(path.join(DATA_DIR, 'nad.db'));
+const db = new sqlite3.Database(DATABASE_PATH);
 
-// Activar WAL mode para mejor rendimiento con escrituras concurrentes
-db.run('PRAGMA journal_mode=WAL', (err) => {
-    if (!err) console.log('📀 SQLite WAL mode activado');
-});
-// Si la DB está ocupada (escritura concurrente), esperar hasta 5s en vez de
-// fallar al instante con SQLITE_BUSY — evita errores intermitentes bajo carga.
-db.run('PRAGMA busy_timeout = 5000');
+const dbGet = (sql, params = []) => migrationDbGet(db, sql, params);
+const dbAll = (sql, params = []) => migrationDbAll(db, sql, params);
+const dbRun = (sql, params = []) => migrationDbRun(db, sql, params);
 
 // Proyectos iniciales (3 destacados en portada, 3 en ver más proyectos)
 const INITIAL_PROJECTS = [
@@ -186,7 +206,7 @@ const DEFAULT_CONTENT = {
         footer: { bg_color: '#111111', text_color: '#FFFFFF', link_hover_color: '#FFC300', heading_color: '#FFC300' }
     },
     images: {
-        logo: 'nad.png',
+        logo: '/nad.png',
         hero_bg: '',
         about_image: 'https://images.unsplash.com/photo-1503387762-592deb58ef4e?auto=format&fit=crop&q=80&w=800',
         cta_bg: ''
@@ -198,102 +218,17 @@ const DEFAULT_CONTENT = {
     }
 };
 
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS admin (
-        id       INTEGER PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS projects (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        title       TEXT NOT NULL,
-        category    TEXT NOT NULL,
-        description TEXT NOT NULL,
-        location    TEXT NOT NULL,
-        year        INTEGER NOT NULL,
-        image       TEXT NOT NULL,
-        featured    INTEGER DEFAULT 1,
-        visible     INTEGER DEFAULT 1,
-        extra_media TEXT DEFAULT '[]',
-        status      TEXT DEFAULT 'Terminado',
-        created_at  TEXT DEFAULT (datetime('now'))
-    )`);
-
-    // Migraciones retrocompatibles para columnas añadidas posteriormente
-    db.run(`ALTER TABLE projects ADD COLUMN featured INTEGER DEFAULT 1`, () => { });
-    db.run(`ALTER TABLE projects ADD COLUMN extra_media TEXT DEFAULT '[]'`, (err) => {
-        if (!err) console.log('✅ Columna extra_media migrada correctamente en projects');
-    });
-    db.run(`ALTER TABLE projects ADD COLUMN status TEXT DEFAULT 'Terminado'`, (err) => {
-        if (!err) console.log('✅ Columna status migrada correctamente en projects');
-    });
-    db.run(`UPDATE projects SET extra_media = '[]' WHERE extra_media IS NULL`, () => { });
-    db.run(`UPDATE projects SET status = 'Terminado' WHERE status IS NULL`, () => { });
-    db.run(`UPDATE projects SET featured = 1 WHERE featured IS NULL`, () => { });
-    db.run(`UPDATE projects SET visible = 1 WHERE visible IS NULL`, () => { });
-    db.run(`UPDATE projects SET category = REPLACE(REPLACE(category, '&oacute;', 'ó'), '&ntilde;', 'ñ')`, () => { });
-    db.run(`UPDATE projects SET title = REPLACE(REPLACE(title, '&oacute;', 'ó'), '&ntilde;', 'ñ')`, () => { });
-    db.run(`UPDATE projects SET description = REPLACE(REPLACE(description, '&oacute;', 'ó'), '&ntilde;', 'ñ')`, () => { });
-
-    db.run(`CREATE TABLE IF NOT EXISTS site_settings (
-        id   INTEGER PRIMARY KEY CHECK (id = 1),
-        data TEXT NOT NULL
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS login_attempts (
-        ip         TEXT NOT NULL,
-        attempts   INTEGER DEFAULT 0,
-        locked_until TEXT,
-        PRIMARY KEY (ip)
-    )`);
-
-    // Crear admin por defecto si no existe
-    db.get('SELECT id FROM admin WHERE id = 1', (err, row) => {
-        if (!row) {
-            const defaultPass = getInitialAdminPassword();
-            if (!defaultPass) {
-                console.warn('⚠️ ADMIN_DEFAULT_PASS no configurado: no se creará un administrador inicial.');
-                return;
-            }
-            const hashed = bcrypt.hashSync(defaultPass, 12);
-            db.run("INSERT INTO admin (username, password) VALUES ('admin', ?)", [hashed]);
-            console.log('✅ Admin inicial creado (usuario: admin)');
-        }
-    });
-
-    // Cargar contenido inicial del sitio si no existe
-    db.get('SELECT id FROM site_settings WHERE id = 1', (err, row) => {
-        if (!row) {
-            db.run('INSERT INTO site_settings (id, data) VALUES (1, ?)', [JSON.stringify(DEFAULT_CONTENT)]);
-            console.log('📝 Contenido inicial del sitio cargado en la base de datos');
-        }
-    });
-
-    // Cargar proyectos iniciales si la tabla está vacía
-    db.get('SELECT COUNT(*) as cnt FROM projects', (err, row) => {
-        if (!err && row.cnt === 0) {
-            const stmt = db.prepare(
-                'INSERT INTO projects (title, category, description, location, year, image, featured, visible) VALUES (?,?,?,?,?,?,?,1)'
-            );
-            INITIAL_PROJECTS.forEach(p => {
-                stmt.run(p.title, p.category, p.description, p.location, p.year, p.image, p.featured !== undefined ? p.featured : 1);
-            });
-            stmt.finalize();
-            console.log(`📦 ${INITIAL_PROJECTS.length} proyectos iniciales cargados en la base de datos`);
-        }
-    });
+let databaseReadyState = false;
+const databaseReady = initializeDatabase(db, {
+    databaseWasPresent: DATABASE_WAS_PRESENT,
+    initialProjects: INITIAL_PROJECTS,
+    defaultContent: DEFAULT_CONTENT,
+    getInitialAdminPassword,
+    bcrypt
+}).then(() => {
+    databaseReadyState = true;
+    console.log('📀 SQLite listo en modo WAL');
 });
-
-// ── Helpers de promesas ──────────────────────────────────────────────────────
-const dbGet = (sql, p = []) => new Promise((res, rej) =>
-    db.get(sql, p, (err, row) => err ? rej(err) : res(row)));
-
-const dbAll = (sql, p = []) => new Promise((res, rej) =>
-    db.all(sql, p, (err, rows) => err ? rej(err) : res(rows)));
-
-const dbRun = (sql, p = []) => new Promise((res, rej) =>
-    db.run(sql, p, function (err) { err ? rej(err) : res(this); }));
 
 // ── Multer (Almacenamiento persistente) ───────────────────────────────────────
 const storage = multer.diskStorage({
@@ -320,7 +255,13 @@ const ALLOWED_UPLOAD_TYPES = new Map([
 
 const upload = multer({
     storage,
-    limits: { fileSize: 25 * 1024 * 1024 }, // 25MB máx
+    limits: {
+        fileSize: 25 * 1024 * 1024,
+        files: 16,
+        fields: 20,
+        fieldSize: 64 * 1024,
+        parts: 40
+    },
     fileFilter: (req, file, cb) => {
         const ext = path.extname(file.originalname).toLowerCase();
         const allowedMimes = ALLOWED_UPLOAD_TYPES.get(ext);
@@ -364,7 +305,7 @@ async function optimizeImageOnDisk(filePath, ext) {
     if (!COMPRESSIBLE_EXT.has(ext)) return;
     try {
         const buffer = await fs.promises.readFile(filePath);
-        let img = sharp(buffer, { failOn: 'none' }).rotate(); // respeta orientación EXIF
+        let img = sharp(buffer, { failOn: 'error', limitInputPixels: 40_000_000 }).rotate(); // respeta orientación EXIF
         const meta = await img.metadata();
         if (meta.width && meta.width > MAX_IMAGE_WIDTH) {
             img = img.resize({ width: MAX_IMAGE_WIDTH, withoutEnlargement: true });
@@ -375,11 +316,11 @@ async function optimizeImageOnDisk(filePath, ext) {
         else outBuffer = await img.jpeg({ quality: 82, mozjpeg: true }).toBuffer();
         await fs.promises.writeFile(filePath, outBuffer);
     } catch (err) {
-        console.warn('No se pudo comprimir la imagen, se conserva original:', err.message);
+        throw new Error(`No se pudo validar u optimizar la imagen: ${err.message}`);
     }
 }
 
-function validateUploadedFiles(req, res, next) {
+function collectUploadedFiles(req) {
     const files = [];
     if (req.file) files.push(req.file);
     if (req.files) {
@@ -387,27 +328,52 @@ function validateUploadedFiles(req, res, next) {
             if (Array.isArray(value)) files.push(...value);
         }
     }
+    return files;
+}
+
+function cleanupUploadedFiles(req) {
+    for (const file of collectUploadedFiles(req)) {
+        try {
+            if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        } catch (error) {
+            console.warn('No se pudo limpiar un archivo temporal:', error.message);
+        }
+    }
+}
+
+async function validateUploadedFiles(req, res, next) {
+    const files = collectUploadedFiles(req);
 
     try {
+        const totalBytes = files.reduce((sum, file) => sum + (file.size || 0), 0);
+        if (totalBytes > 120 * 1024 * 1024) {
+            cleanupUploadedFiles(req);
+            return res.status(400).json({ error: 'La carga completa supera el máximo permitido de 120MB.' });
+        }
+
+        if (typeof fs.statfsSync === 'function') {
+            const stats = fs.statfsSync(UPLOADS_DIR);
+            const availableBytes = Number(stats.bavail) * Number(stats.bsize);
+            if (Number.isFinite(availableBytes) && availableBytes < Math.max(150 * 1024 * 1024, totalBytes * 2)) {
+                cleanupUploadedFiles(req);
+                return res.status(507).json({ error: 'No hay espacio suficiente para procesar la carga.' });
+            }
+        }
+
         const invalid = files.find(file => !hasUploadSignature(file));
         if (!invalid) {
-            // Optimizar imágenes válidas en disco en segundo plano antes de continuar
-            Promise.all(files.map(file => {
+            // La respuesta no continúa hasta que las imágenes estén completamente
+            // escritas. Esto evita servir archivos parciales durante un SIGTERM.
+            await Promise.all(files.map(file => {
                 const ext = path.extname(file.path || file.filename || '').toLowerCase();
                 return optimizeImageOnDisk(file.path, ext);
-            })).catch(err => console.warn('Error optimizando imágenes:', err.message));
-
+            }));
             return next();
         }
-
-        for (const file of files) {
-            try { if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch (err) { }
-        }
+        cleanupUploadedFiles(req);
         return res.status(400).json({ error: 'El contenido real del archivo no coincide con un formato permitido.' });
     } catch (err) {
-        for (const file of files) {
-            try { if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path); } catch (cleanupErr) { }
-        }
+        cleanupUploadedFiles(req);
         console.error('Error validando firma de archivo:', err);
         return res.status(400).json({ error: 'No se pudo validar el archivo subido.' });
     }
@@ -438,25 +404,18 @@ app.use(helmet({
             scriptSrc: [
                 "'self'",
                 "'unsafe-inline'",
-                'https://unpkg.com',
-                'https://cdn.jsdelivr.net',
-                'https://cdn.plyr.io',
                 'https://www.instagram.com'
             ],
             scriptSrcAttr: ["'unsafe-inline'"],
             styleSrc: [
                 "'self'",
                 "'unsafe-inline'",
-                'https://cdn.plyr.io',
-                'https://cdn.jsdelivr.net',
-                'https://cdnjs.cloudflare.com',
                 'https://fonts.googleapis.com'
             ],
             fontSrc: [
                 "'self'",
                 'data:',
-                'https://fonts.gstatic.com',
-                'https://cdnjs.cloudflare.com'
+                'https://fonts.gstatic.com'
             ],
             imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
             mediaSrc: ["'self'", 'blob:', 'https:'],
@@ -481,8 +440,8 @@ app.use(helmet({
         }
     }
 }));
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+app.use(express.json({ limit: '1mb', strict: true }));
+app.use(express.urlencoded({ extended: true, limit: '256kb', parameterLimit: 200 }));
 
 // Servir archivos estáticos de uploads tanto desde UPLOADS_DIR (Volumen) como fallback
 // Los nombres de archivo subidos son únicos (timestamp + random) y nunca se reutilizan,
@@ -491,6 +450,11 @@ const UPLOADS_CACHE = { maxAge: '30d', immutable: true };
 app.use('/uploads', express.static(UPLOADS_DIR, UPLOADS_CACHE));
 app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads'), UPLOADS_CACHE));
 app.use('/public', express.static(path.join(__dirname, 'public'), UPLOADS_CACHE));
+const VENDOR_CACHE = { maxAge: '30d', immutable: true };
+app.use('/vendor/lucide', express.static(path.join(__dirname, 'node_modules', 'lucide', 'dist', 'umd'), VENDOR_CACHE));
+app.use('/vendor/swiper', express.static(path.join(__dirname, 'node_modules', 'swiper'), VENDOR_CACHE));
+app.use('/vendor/plyr', express.static(path.join(__dirname, 'node_modules', 'plyr', 'dist'), VENDOR_CACHE));
+app.use('/vendor/fontawesome', express.static(path.join(__dirname, 'node_modules', '@fortawesome', 'fontawesome-free'), VENDOR_CACHE));
 // --- SEO & Dynamic Rendering ---
 const defaultMeta = {
     title: 'NAD Constructora | Arquitectura, Diseño y Construcción',
@@ -499,6 +463,24 @@ const defaultMeta = {
     url: '/'
 };
 
+function applyPublicCsp(res, nonce) {
+    res.setHeader('Content-Security-Policy', [
+        "default-src 'self'",
+        `script-src 'self' 'nonce-${nonce}' https://www.instagram.com`,
+        "script-src-attr 'none'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "img-src 'self' data: blob: https:",
+        "media-src 'self' blob: https:",
+        "frame-src 'self' https://www.youtube.com https://youtube.com https://www.youtube-nocookie.com https://www.instagram.com https://www.google.com",
+        "connect-src 'self' https://www.instagram.com https://graph.instagram.com",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'self'"
+    ].join('; '));
+}
+
 function escapeHtml(value) {
     return String(value == null ? '' : value)
         .replace(/&/g, '&amp;')
@@ -506,6 +488,96 @@ function escapeHtml(value) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function normalizeProjectInput(body, existing = null) {
+    const requiredText = (name, maxLength) => {
+        const incoming = body[name];
+        const value = incoming === undefined && existing ? existing[name] : incoming;
+        if (typeof value !== 'string' || !value.trim()) throw new ContentValidationError(`El campo ${name} es obligatorio`);
+        const trimmed = value.trim();
+        if (trimmed.length > maxLength) throw new ContentValidationError(`El campo ${name} es demasiado largo`);
+        return trimmed;
+    };
+    const yearValue = body.year === undefined && existing ? existing.year : Number.parseInt(body.year, 10);
+    const maxYear = new Date().getFullYear() + 10;
+    if (!Number.isInteger(Number(yearValue)) || Number(yearValue) < 1900 || Number(yearValue) > maxYear) {
+        throw new ContentValidationError(`El año debe estar entre 1900 y ${maxYear}`);
+    }
+    const booleanField = name => {
+        const incoming = body[name];
+        const value = incoming === undefined
+            ? (existing ? existing[name] : 1)
+            : Number.parseInt(incoming, 10);
+        if (value !== 0 && value !== 1) throw new ContentValidationError(`${name} debe ser 0 o 1`);
+        return value;
+    };
+    const status = body.status === undefined && existing ? existing.status : (body.status || 'Terminado');
+    if (!['Terminado', 'En Curso'].includes(status)) throw new ContentValidationError('Estado de proyecto inválido');
+    return {
+        title: requiredText('title', 200),
+        category: requiredText('category', 160),
+        description: requiredText('description', 20000),
+        location: requiredText('location', 200),
+        year: Number(yearValue),
+        featured: booleanField('featured'),
+        visible: booleanField('visible'),
+        status
+    };
+}
+
+function parseMediaList(value) {
+    if (!value) return [];
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!Array.isArray(parsed)) throw new ContentValidationError('La galería del proyecto es inválida');
+    return parsed;
+}
+
+function contentContainsUrl(value, url) {
+    if (value === url) return true;
+    if (Array.isArray(value)) return value.some(item => contentContainsUrl(item, url));
+    if (value && typeof value === 'object') return Object.values(value).some(item => contentContainsUrl(item, url));
+    return false;
+}
+
+async function isUploadReferenced(url) {
+    const primary = await dbGet('SELECT id FROM projects WHERE image = ? LIMIT 1', [url]);
+    if (primary) return true;
+    const projects = await dbAll("SELECT extra_media FROM projects WHERE extra_media LIKE '%/uploads/%'");
+    for (const project of projects) {
+        try {
+            if (parseMediaList(project.extra_media).includes(url)) return true;
+        } catch (error) { }
+    }
+    const content = await getContent();
+    return contentContainsUrl(content, url);
+}
+
+function escapeCssString(value) {
+    return String(value == null ? '' : value)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, '\\27 ')
+        .replace(/"/g, '\\22 ')
+        .replace(/</g, '\\3c ')
+        .replace(/>/g, '\\3e ')
+        .replace(/[\r\n\f]/g, ' ');
+}
+
+function mergeContent(current, patch) {
+    const mergedSectionStyles = { ...(current.section_styles || {}) };
+    if (patch.section_styles) {
+        for (const [section, values] of Object.entries(patch.section_styles)) {
+            mergedSectionStyles[section] = { ...(mergedSectionStyles[section] || {}), ...values };
+        }
+    }
+    return {
+        texts: { ...(current.texts || {}), ...(patch.texts || {}) },
+        styles: { ...(current.styles || {}), ...(patch.styles || {}) },
+        section_styles: mergedSectionStyles,
+        images: { ...(current.images || {}), ...(patch.images || {}) },
+        video: { ...(current.video || {}), ...(patch.video || {}) },
+        clients_carousel: { ...(current.clients_carousel || {}), ...(patch.clients_carousel || {}) }
+    };
 }
 
 function upsertMetaTag(html, attribute, name, content) {
@@ -561,31 +633,50 @@ function getHtmlTemplate(filename) {
 // admin guarda cambios, para no pegarle a SQLite en cada request bajo tráfico alto.
 let cachedContent = null;
 let cachedPublicProjects = null;
-function invalidateContentCache() { cachedContent = null; }
-function invalidateProjectsCache() { cachedPublicProjects = null; }
+let cachedContentAt = 0;
+let cachedPublicProjectsAt = 0;
+const CACHE_TTL_MS = 5000;
+function invalidateContentCache() { cachedContent = null; cachedContentAt = 0; }
+function invalidateProjectsCache() { cachedPublicProjects = null; cachedPublicProjectsAt = 0; }
 
 async function getContent() {
-    if (cachedContent) return cachedContent;
+    if (cachedContent && Date.now() - cachedContentAt < CACHE_TTL_MS) return cachedContent;
     const row = await dbGet('SELECT data FROM site_settings WHERE id = 1');
-    cachedContent = (row && row.data) ? JSON.parse(row.data) : DEFAULT_CONTENT;
+    if (!row || !row.data) {
+        cachedContent = DEFAULT_CONTENT;
+        cachedContentAt = Date.now();
+        return cachedContent;
+    }
+    try {
+        const parsed = JSON.parse(row.data);
+        const validated = validateContentPatch(parsed);
+        cachedContent = mergeContent(DEFAULT_CONTENT, validated);
+    } catch (error) {
+        console.error('Contenido CMS inválido almacenado; se usarán valores seguros:', error.message);
+        cachedContent = DEFAULT_CONTENT;
+    }
+    cachedContentAt = Date.now();
     return cachedContent;
 }
 
 async function getPublicProjects() {
-    if (cachedPublicProjects) return cachedPublicProjects;
+    if (cachedPublicProjects && Date.now() - cachedPublicProjectsAt < CACHE_TTL_MS) return cachedPublicProjects;
     cachedPublicProjects = await dbAll('SELECT * FROM projects WHERE visible = 1 ORDER BY featured DESC, year DESC, id DESC');
+    cachedPublicProjectsAt = Date.now();
     return cachedPublicProjects;
 }
 
 async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
-    const DOMAIN = req.protocol + '://' + req.get('host');
+    const DOMAIN = publicOrigin(req);
     const meta = { ...defaultMeta, ...metaOverride };
+    const cspNonce = crypto.randomBytes(18).toString('base64');
 
     try {
         // Obtener config para inyectar CSS variables y evitar FOUC
         const config = await getContent();
         const stylesData = config ? config.styles : null;
         let html = getHtmlTemplate(filename);
+        html = html.replace(/<script type="application\/ld\+json">/g, `<script type="application/ld+json" nonce="${cspNonce}">`);
 
         // Inyectar imágenes del CMS para evitar FOUC y flashes de imágenes por defecto
         const sliderImgs = (config && config.images && Array.isArray(config.images.hero_slider) && config.images.hero_slider.length > 0)
@@ -597,17 +688,17 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
         if (firstHeroImg) {
             html = html.replace(
                 '<div class="hero-bg slide active" id="cms-hero-bg"></div>',
-                `<div class="hero-bg slide active" id="cms-hero-bg" style="background-image: url('${escapeHtml(firstHeroImg)}');"></div>`
+                `<div class="hero-bg slide active" id="cms-hero-bg" style="background-image: url('${escapeCssString(firstHeroImg)}');"></div>`
             );
             const preloadTag = `<link rel="preload" as="image" href="${escapeHtml(firstHeroImg)}" fetchpriority="high">`;
             html = html.replace('</head>', `    ${preloadTag}\n</head>`);
-            heroImageCss = `#cms-hero-bg { background-image: url('${firstHeroImg}') !important; }`;
+            heroImageCss = `#cms-hero-bg { background-image: url('${escapeCssString(firstHeroImg)}') !important; }`;
         }
 
         if (config && config.images && config.images.cta_bg) {
             const ctaBg = safePublicMediaUrl(config.images.cta_bg);
             if (ctaBg) {
-                heroImageCss += ` .cta-section { background-image: url('${ctaBg}') !important; }`;
+                heroImageCss += ` .cta-section { background-image: url('${escapeCssString(ctaBg)}') !important; }`;
             }
         }
 
@@ -647,11 +738,11 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
                     if (s.overlay_opacity) vars += `--sec-overlay:${s.overlay_opacity};`;
                     if (s.link_hover_color) vars += `--sec-link-hover:${s.link_hover_color};`;
                     if (s.font_heading) {
-                        vars += `--sec-font-heading:'${s.font_heading}', sans-serif;`;
+                        vars += `--sec-font-heading:'${escapeCssString(s.font_heading)}', sans-serif;`;
                         allUsedFonts.add(s.font_heading);
                     }
                     if (s.font_body) {
-                        vars += `--sec-font-body:'${s.font_body}', sans-serif;`;
+                        vars += `--sec-font-body:'${escapeCssString(s.font_body)}', sans-serif;`;
                         allUsedFonts.add(s.font_body);
                     }
                     // Difuminado del logo/menú mientras el header flota sobre el hero
@@ -681,14 +772,14 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
                 }
 
                 // Generate Google Fonts URL dynamically for all used fonts
-                const gFontsUrl = Array.from(allUsedFonts).map(f => `family=${f.replace(/ /g, '+')}:wght@300;400;500;600;700;800`).join('&');
+                const gFontsUrl = Array.from(allUsedFonts).map(f => `family=${encodeURIComponent(f)}:wght@300;400;500;600;700;800`).join('&');
 
                 const dynamicStyle = `
-                <link id="dynamic-fonts" href="https://fonts.googleapis.com/css2?${gFontsUrl}&display=swap" rel="stylesheet">
+                <link id="dynamic-fonts" href="https://fonts.googleapis.com/css2?${escapeHtml(gFontsUrl)}&amp;display=swap" rel="stylesheet">
                 <style>
                     :root {
-                        --font-heading: '${stylesData.font_heading}', sans-serif;
-                        --font-body: '${stylesData.font_body}', sans-serif;
+                        --font-heading: '${escapeCssString(stylesData.font_heading)}', sans-serif;
+                        --font-body: '${escapeCssString(stylesData.font_body)}', sans-serif;
                         --hero-title-size: ${stylesData.hero_title_size};
                         --h2-size: ${stylesData.h2_size};
                         --body-font-size: ${stylesData.body_font_size};
@@ -747,6 +838,7 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
                 html = html.replace('</head>', '    ' + canonicalTag + '\n</head>');
             }
 
+            applyPublicCsp(res, cspNonce);
             res.send(html);
     } catch (e) {
         console.error('Error renderizando página:', e);
@@ -775,8 +867,10 @@ function safePublicMediaUrl(value) {
     return null;
 }
 
-function renderProjectPage(req, res, row) {
-    const domain = req.protocol + '://' + req.get('host');
+async function renderProjectPage(req, res, row) {
+    const domain = publicOrigin(req);
+    const content = await getContent();
+    const logoUrl = safePublicMediaUrl(content?.images?.logo) || '/nad.png';
     const canonicalUrl = domain + '/proyecto/' + row.id;
     const primaryUrl = safePublicMediaUrl(row.image) || '/nad.png';
     const isPrimaryVideo = /\.(mp4|webm|mov)(?:$|\?)/i.test(primaryUrl);
@@ -816,6 +910,7 @@ function renderProjectPage(req, res, row) {
         '{{LOCATION}}': escapeHtml(row.location || 'Paraguay'),
         '{{YEAR}}': escapeHtml(row.year || ''),
         '{{STATUS}}': escapeHtml(row.status || 'Terminado'),
+        '{{LOGO_URL}}': escapeHtml(logoUrl),
         '{{CANONICAL_URL}}': escapeHtml(canonicalUrl),
         '{{OG_IMAGE}}': escapeHtml(ogImage),
         '{{WHATSAPP_TEXT}}': encodeURIComponent(`Hola NAD Constructora, quiero consultar por un proyecto similar a "${row.title || 'este proyecto'}".`),
@@ -828,18 +923,19 @@ function renderProjectPage(req, res, row) {
         html = html.split(placeholder).join(value);
     }
 
+    applyPublicCsp(res, crypto.randomBytes(18).toString('base64'));
     res.type('html').send(html);
 }
 
-app.get('/proyecto/:id', (req, res) => {
-    db.get('SELECT * FROM projects WHERE id = ? AND visible = 1', [req.params.id], (err, row) => {
-        if (err) {
-            console.error('Error cargando proyecto:', err);
-            return res.status(500).send('Error interno');
-        }
+app.get('/proyecto/:id', async (req, res) => {
+    try {
+        const row = await dbGet('SELECT * FROM projects WHERE id = ? AND visible = 1', [req.params.id]);
         if (!row) return res.status(404).send('Proyecto no encontrado');
-        return renderProjectPage(req, res, row);
-    });
+        return await renderProjectPage(req, res, row);
+    } catch (error) {
+        console.error('Error cargando proyecto:', error);
+        return res.status(500).send('Error interno');
+    }
 });
 
 // Servir solo archivos estáticos seguros (CSS, JS del cliente, imágenes, fuentes)
@@ -883,9 +979,10 @@ app.use(express.static(__dirname, {
     }
 }));
 
+const sessionStore = new SQLiteSessionStore(db);
 app.use(session({
     name: 'nad.sid',
-    store: new SQLiteSessionStore(db),
+    store: sessionStore,
     secret: getSessionSecret(),
     resave: false,
     saveUninitialized: false,
@@ -915,76 +1012,119 @@ function requireSameOrigin(req, res, next) {
 
     try {
         const sourceUrl = new URL(source);
-        const sourceHost = sourceUrl.host.toLowerCase();
-        const sourceHostname = sourceUrl.hostname.toLowerCase();
-
-        const hostHeader = (req.get('host') || '').toLowerCase();
-        const xForwardedHost = (req.get('x-forwarded-host') || '').toLowerCase();
-
-        const validHostnames = [
-            hostHeader.split(':')[0],
-            xForwardedHost.split(':')[0],
-            'localhost',
-            '127.0.0.1'
-        ].filter(Boolean);
-
-        if (validHostnames.includes(sourceHostname) || sourceHost === hostHeader || (xForwardedHost && sourceHost === xForwardedHost)) {
-            return next();
-        }
-
-        const expectedOrigin = req.protocol + '://' + req.get('host');
-        if (sourceUrl.origin === expectedOrigin) {
-            return next();
-        }
+        const forwardedHost = String(req.get('x-forwarded-host') || '').split(',')[0].trim();
+        const forwardedProto = String(req.get('x-forwarded-proto') || '').split(',')[0].trim();
+        const requestOrigin = `${req.protocol}://${req.get('host')}`;
+        const allowedOrigins = new Set(SITE_URL
+            ? [SITE_URL]
+            : [
+                requestOrigin,
+                forwardedHost ? `${forwardedProto || req.protocol}://${forwardedHost}` : null
+            ].filter(Boolean));
+        if (allowedOrigins.has(sourceUrl.origin)) return next();
     } catch (err) { }
 
     return res.status(403).json({ error: 'Origen de solicitud no permitido' });
 }
 
-// Rate limiting para login (máx 5 intentos, bloqueo 15 min)
-async function checkRateLimit(ip) {
+// Rate limiting para login (máx 5 intentos por IP + usuario, bloqueo 15 min)
+function loginAttemptKey(ip, username) {
+    return `${String(ip || 'unknown').slice(0, 128)}|${String(username || '').trim().toLowerCase().slice(0, 100)}`;
+}
+
+async function cleanupLoginAttempts() {
+    await dbRun("DELETE FROM login_attempts WHERE updated_at < datetime('now', '-7 days')");
+}
+
+async function checkRateLimit(key) {
     const now = new Date();
-    let record = await dbGet('SELECT * FROM login_attempts WHERE ip = ?', [ip]);
+    const record = await dbGet('SELECT * FROM login_attempts WHERE ip = ?', [key]);
 
     if (record) {
         if (record.locked_until && new Date(record.locked_until) > now) {
             const secs = Math.ceil((new Date(record.locked_until) - now) / 1000);
             return { blocked: true, seconds: secs };
         }
-        if (record.attempts >= 5) {
-            const lockUntil = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
-            await dbRun('UPDATE login_attempts SET locked_until = ?, attempts = 0 WHERE ip = ?', [lockUntil, ip]);
-            return { blocked: true, seconds: 900 };
+        if (record.locked_until) {
+            await dbRun('UPDATE login_attempts SET locked_until = NULL, attempts = 0, updated_at = datetime(\'now\') WHERE ip = ?', [key]);
         }
     }
     return { blocked: false };
 }
 
-async function recordFailedAttempt(ip) {
-    const existing = await dbGet('SELECT * FROM login_attempts WHERE ip = ?', [ip]);
-    if (existing) {
-        await dbRun('UPDATE login_attempts SET attempts = attempts + 1 WHERE ip = ?', [ip]);
-    } else {
-        await dbRun('INSERT INTO login_attempts (ip, attempts) VALUES (?, 1)', [ip]);
+async function recordFailedAttempt(key) {
+    await dbRun(
+        `INSERT INTO login_attempts (ip, attempts, locked_until, updated_at)
+         VALUES (?, 1, NULL, datetime('now'))
+         ON CONFLICT(ip) DO UPDATE SET
+            attempts = CASE WHEN login_attempts.locked_until IS NOT NULL AND login_attempts.locked_until <= datetime('now') THEN 1 ELSE login_attempts.attempts + 1 END,
+            locked_until = CASE WHEN login_attempts.locked_until IS NOT NULL AND login_attempts.locked_until <= datetime('now') THEN NULL ELSE login_attempts.locked_until END,
+            updated_at = datetime('now')`,
+        [key]
+    );
+    const record = await dbGet('SELECT attempts FROM login_attempts WHERE ip = ?', [key]);
+    if (record && record.attempts >= 5) {
+        const lockUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+        await dbRun(
+            'UPDATE login_attempts SET locked_until = ?, attempts = 0, updated_at = datetime(\'now\') WHERE ip = ?',
+            [lockUntil, key]
+        );
+        return { blocked: true, seconds: 900, remaining: 0 };
     }
+    return { blocked: false, remaining: Math.max(0, 5 - (record ? record.attempts : 1)) };
 }
 
-async function resetAttempts(ip) {
-    await dbRun('DELETE FROM login_attempts WHERE ip = ?', [ip]);
+async function resetAttempts(key) {
+    await dbRun('DELETE FROM login_attempts WHERE ip = ?', [key]);
 }
 
 // ── Rutas Públicas ───────────────────────────────────────────────────────────
 
 
-// Health check para Railway
-app.get('/health', (req, res) => res.status(200).json({ status: 'ok', uptime: process.uptime() }));
+async function readinessReport() {
+    const checks = {
+        database: 'error',
+        storage: 'error',
+        persistence: PERSISTENT_STORAGE_CONFIGURED ? 'ok' : 'not_configured'
+    };
+    try {
+        if (databaseReadyState) {
+            await dbGet('SELECT 1 AS ok');
+            checks.database = 'ok';
+        }
+    } catch (error) {
+        checks.database = 'error';
+    }
+    try {
+        fs.accessSync(DATA_DIR, fs.constants.R_OK | fs.constants.W_OK);
+        fs.accessSync(UPLOADS_DIR, fs.constants.R_OK | fs.constants.W_OK);
+        checks.storage = 'ok';
+    } catch (error) {
+        checks.storage = 'error';
+    }
+    const ready = checks.database === 'ok' && checks.storage === 'ok' && checks.persistence === 'ok';
+    return { ready, checks };
+}
+
+app.get('/health/live', (req, res) => res.status(200).json({ status: 'ok', uptime: process.uptime() }));
+app.get(['/health', '/health/ready'], async (req, res) => {
+    const report = await readinessReport();
+    res.status(report.ready ? 200 : 503).json({
+        status: report.ready ? 'ok' : 'unavailable',
+        uptime: process.uptime(),
+        checks: report.checks
+    });
+});
 
 // API pública
 app.get('/api/projects', async (req, res) => {
     try {
         const rows = await getPublicProjects();
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error('Error cargando proyectos públicos:', e);
+        res.status(500).json({ error: 'No se pudieron cargar los proyectos' });
+    }
 });
 
 app.get('/api/content', async (req, res) => {
@@ -1004,23 +1144,30 @@ app.get([`/${ADMIN_PATH}/login`, `/${ADMIN_PATH}/login/`], (req, res) => {
 app.post([`/${ADMIN_PATH}/login`, `/${ADMIN_PATH}/login/`], requireSameOrigin, async (req, res) => {
     const ip = req.ip || req.connection.remoteAddress;
     try {
-        const limit = await checkRateLimit(ip);
+        const username = typeof req.body.username === 'string' ? req.body.username.trim().slice(0, 100) : '';
+        const password = typeof req.body.password === 'string' ? req.body.password : '';
+        const attemptKey = loginAttemptKey(ip, username);
+        await cleanupLoginAttempts();
+        const limit = await checkRateLimit(attemptKey);
         if (limit.blocked) {
             const mins = Math.ceil(limit.seconds / 60);
             return res.redirect(`/${ADMIN_PATH}/login?error=blocked&mins=${mins}`);
         }
 
-        const { username, password } = req.body;
-        const admin = await dbGet('SELECT * FROM admin WHERE username = ?', [username]);
+        const admin = username && password
+            ? await dbGet('SELECT * FROM admin WHERE username = ?', [username])
+            : null;
+        const validPassword = admin ? await bcrypt.compare(password, admin.password) : false;
 
-        if (!admin || !bcrypt.compareSync(password, admin.password)) {
-            await recordFailedAttempt(ip);
-            const rec = await dbGet('SELECT attempts FROM login_attempts WHERE ip = ?', [ip]);
-            const remaining = 5 - (rec ? rec.attempts : 1);
-            return res.redirect(`/${ADMIN_PATH}/login?error=1&remaining=${Math.max(0, remaining)}`);
+        if (!admin || !validPassword) {
+            const failure = await recordFailedAttempt(attemptKey);
+            if (failure.blocked) {
+                return res.redirect(`/${ADMIN_PATH}/login?error=blocked&mins=15`);
+            }
+            return res.redirect(`/${ADMIN_PATH}/login?error=1&remaining=${failure.remaining}`);
         }
 
-        await resetAttempts(ip);
+        await resetAttempts(attemptKey);
         await new Promise((resolve, reject) => {
             req.session.regenerate(err => err ? reject(err) : resolve());
         });
@@ -1057,7 +1204,10 @@ app.get(`/${ADMIN_PATH}/api/projects`, requireAuth, async (req, res) => {
     try {
         const rows = await dbAll('SELECT * FROM projects ORDER BY featured DESC, year DESC, id DESC');
         res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error('Error cargando proyectos administrativos:', e);
+        res.status(500).json({ error: 'No se pudieron cargar los proyectos' });
+    }
 });
 
 app.post(`/${ADMIN_PATH}/api/projects`, requireAuth, (req, res, next) => {
@@ -1066,33 +1216,31 @@ app.post(`/${ADMIN_PATH}/api/projects`, requireAuth, (req, res, next) => {
         return validateUploadedFiles(req, res, next);
     });
 }, async (req, res) => {
-    if (!req.files || !req.files['image']) return res.status(400).json({ error: 'Se requiere una imagen o video para el proyecto' });
-    const { title, category, description, location, year, featured, visible, status } = req.body;
-    if (!title || !category || !description || !location) {
-        return res.status(400).json({ error: 'Completá todos los campos obligatorios' });
-    }
-    const imagePath = '/uploads/' + req.files['image'][0].filename;
-
-    let extraMediaUrls = [];
-    if (req.files['extra_media']) {
-        extraMediaUrls = req.files['extra_media'].map(f => '/uploads/' + f.filename);
-    }
-    const extraMediaJson = JSON.stringify(extraMediaUrls);
-
-    const numYear = parseInt(year) || new Date().getFullYear();
-    const numFeatured = featured !== undefined && featured !== '' ? parseInt(featured) : 1;
-    const numVisible = visible !== undefined && visible !== '' ? parseInt(visible) : 1;
-
     try {
+        if (!req.files || !req.files['image']) {
+            cleanupUploadedFiles(req);
+            return res.status(400).json({ error: 'Se requiere una imagen o video para el proyecto' });
+        }
+        const project = normalizeProjectInput(req.body);
+        const imagePath = '/uploads/' + req.files['image'][0].filename;
+        const extraMediaUrls = req.files['extra_media']
+            ? req.files['extra_media'].map(file => '/uploads/' + file.filename)
+            : [];
         const result = await dbRun(
             'INSERT INTO projects (title, category, description, location, year, image, featured, visible, extra_media, status) VALUES (?,?,?,?,?,?,?,?,?,?)',
-            [title.trim(), category.trim(), description.trim(), location.trim(), numYear, imagePath, numFeatured, numVisible, extraMediaJson, status || 'Terminado']
+            [
+                project.title, project.category, project.description, project.location,
+                project.year, imagePath, project.featured, project.visible,
+                JSON.stringify(extraMediaUrls), project.status
+            ]
         );
         invalidateProjectsCache();
-        res.json({ id: result.lastID, image: imagePath });
+        res.status(201).json({ id: result.lastID, image: imagePath });
     } catch (e) {
+        cleanupUploadedFiles(req);
+        if (e instanceof ContentValidationError) return res.status(400).json({ error: e.message });
         console.error('Error creando proyecto:', e);
-        res.status(500).json({ error: e.message || 'Error al guardar proyecto' });
+        res.status(500).json({ error: 'Error al guardar proyecto' });
     }
 });
 
@@ -1102,76 +1250,61 @@ app.put(`/${ADMIN_PATH}/api/projects/:id`, requireAuth, (req, res, next) => {
         return validateUploadedFiles(req, res, next);
     });
 }, async (req, res) => {
-    const { title, category, description, location, year, featured, visible, kept_extra_media, status } = req.body;
     try {
         const existing = await dbGet('SELECT * FROM projects WHERE id = ?', [req.params.id]);
-        if (!existing) return res.status(404).json({ error: 'Proyecto no encontrado' });
+        if (!existing) {
+            cleanupUploadedFiles(req);
+            return res.status(404).json({ error: 'Proyecto no encontrado' });
+        }
+        const project = normalizeProjectInput(req.body, existing);
 
         let imagePath = existing.image;
         if (req.files && req.files['image']) {
             imagePath = '/uploads/' + req.files['image'][0].filename;
-            if (existing.image && existing.image.startsWith('/uploads/')) {
-                const filename = path.basename(existing.image);
-                const p1 = path.join(UPLOADS_DIR, filename);
-                const p2 = path.join(__dirname, 'public', 'uploads', filename);
-                try {
-                    if (fs.existsSync(p1)) fs.unlinkSync(p1);
-                    else if (fs.existsSync(p2)) fs.unlinkSync(p2);
-                } catch (err) {
-                    console.warn('No se pudo borrar el archivo físico antiguo:', err.message);
-                }
-            }
         }
 
-        // Handle extra_media
-        let extraMediaUrls = [];
-        // Keep existing media that wasn't deleted
-        if (kept_extra_media) {
-            try {
-                extraMediaUrls = JSON.parse(kept_extra_media);
-            } catch (err) {
-                extraMediaUrls = [];
-            }
+        const previousExtraMedia = parseMediaList(existing.extra_media || '[]');
+        let extraMediaUrls = req.body.kept_extra_media
+            ? parseMediaList(req.body.kept_extra_media)
+            : previousExtraMedia.slice();
+        if (!extraMediaUrls.every(url => previousExtraMedia.includes(url))) {
+            throw new ContentValidationError('La lista de archivos conservados contiene elementos inválidos');
         }
-        // Borrar del disco los archivos que el usuario sacó de la lista (evita huérfanos)
-        try {
-            const previousExtraMedia = JSON.parse(existing.extra_media || '[]');
-            previousExtraMedia
-                .filter(url => !extraMediaUrls.includes(url))
-                .forEach(url => deleteUploadFile(url));
-        } catch (err) { }
-        // Add newly uploaded media
         if (req.files && req.files['extra_media']) {
             const newMedia = req.files['extra_media'].map(f => '/uploads/' + f.filename);
             extraMediaUrls = extraMediaUrls.concat(newMedia);
         }
-        const extraMediaJson = JSON.stringify(extraMediaUrls);
-
-        const numYear = parseInt(year) || existing.year || new Date().getFullYear();
-        const numFeatured = featured !== undefined && featured !== '' ? parseInt(featured) : existing.featured;
-        const numVisible = visible !== undefined && visible !== '' ? parseInt(visible) : existing.visible;
+        if (extraMediaUrls.length > 60) throw new ContentValidationError('La galería supera el máximo de 60 archivos');
 
         await dbRun(
             'UPDATE projects SET title=?,category=?,description=?,location=?,year=?,image=?,featured=?,visible=?,extra_media=?,status=? WHERE id=?',
             [
-                title ? title.trim() : existing.title,
-                category ? category.trim() : existing.category,
-                description ? description.trim() : existing.description,
-                location ? location.trim() : existing.location,
-                numYear,
+                project.title,
+                project.category,
+                project.description,
+                project.location,
+                project.year,
                 imagePath,
-                numFeatured,
-                numVisible,
-                extraMediaJson,
-                status !== undefined ? status : existing.status,
+                project.featured,
+                project.visible,
+                JSON.stringify(extraMediaUrls),
+                project.status,
                 req.params.id
             ]
         );
+        if (imagePath !== existing.image) deleteUploadFile(existing.image);
+        previousExtraMedia
+            .filter(url => !extraMediaUrls.includes(url))
+            .forEach(url => deleteUploadFile(url));
         invalidateProjectsCache();
         res.json({ success: true, image: imagePath });
     } catch (e) {
+        cleanupUploadedFiles(req);
+        if (e instanceof ContentValidationError || e instanceof SyntaxError) {
+            return res.status(400).json({ error: e.message || 'Datos inválidos' });
+        }
         console.error('Error actualizando proyecto:', e);
-        res.status(500).json({ error: e.message || 'Error al actualizar proyecto' });
+        res.status(500).json({ error: 'Error al actualizar proyecto' });
     }
 });
 
@@ -1180,19 +1313,17 @@ app.delete(`/${ADMIN_PATH}/api/projects/:id`, requireAuth, async (req, res) => {
         const project = await dbGet('SELECT * FROM projects WHERE id = ?', [req.params.id]);
         if (!project) return res.status(404).json({ error: 'Proyecto no encontrado' });
 
-        // Borrar imagen principal
-        deleteUploadFile(project.image);
-
-        // Borrar archivos extra_media (antes quedaban huérfanos)
-        try {
-            const extraMedia = JSON.parse(project.extra_media || '[]');
-            extraMedia.forEach(url => deleteUploadFile(url));
-        } catch (e) { }
-
         await dbRun('DELETE FROM projects WHERE id = ?', [req.params.id]);
+        deleteUploadFile(project.image);
+        try {
+            parseMediaList(project.extra_media || '[]').forEach(url => deleteUploadFile(url));
+        } catch (e) { }
         invalidateProjectsCache();
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error('Error eliminando proyecto:', e);
+        res.status(500).json({ error: 'Error al eliminar proyecto' });
+    }
 });
 
 app.patch(`/${ADMIN_PATH}/api/projects/:id/toggle`, requireAuth, async (req, res) => {
@@ -1203,7 +1334,10 @@ app.patch(`/${ADMIN_PATH}/api/projects/:id/toggle`, requireAuth, async (req, res
         await dbRun('UPDATE projects SET visible = ? WHERE id = ?', [newVal, req.params.id]);
         invalidateProjectsCache();
         res.json({ visible: newVal });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error('Error cambiando visibilidad:', e);
+        res.status(500).json({ error: 'No se pudo cambiar la visibilidad' });
+    }
 });
 
 app.patch(`/${ADMIN_PATH}/api/projects/:id/toggle-featured`, requireAuth, async (req, res) => {
@@ -1214,48 +1348,27 @@ app.patch(`/${ADMIN_PATH}/api/projects/:id/toggle-featured`, requireAuth, async 
         await dbRun('UPDATE projects SET featured = ? WHERE id = ?', [newVal, req.params.id]);
         invalidateProjectsCache();
         res.json({ featured: newVal });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error('Error cambiando clasificación:', e);
+        res.status(500).json({ error: 'No se pudo cambiar la clasificación' });
+    }
 });
 
 // ── API admin: CMS Contenido, Estilos e Imágenes (Con Fusión Segura) ──────────
 app.get(`/${ADMIN_PATH}/api/content`, requireAuth, async (req, res) => {
     try {
-        const row = await dbGet('SELECT data FROM site_settings WHERE id = 1');
-        if (row && row.data) {
-            res.json(JSON.parse(row.data));
-        } else {
-            res.json(DEFAULT_CONTENT);
-        }
-    } catch (e) { res.status(500).json({ error: e.message }); }
+        res.json(await getContent());
+    } catch (e) {
+        console.error('Error leyendo contenido CMS:', e);
+        res.status(500).json({ error: 'No se pudo leer el contenido del sitio' });
+    }
 });
 
 app.put(`/${ADMIN_PATH}/api/content`, requireAuth, async (req, res) => {
     try {
-        const data = req.body;
-        if (!data || typeof data !== 'object') {
-            return res.status(400).json({ error: 'Datos inválidos' });
-        }
-        // Fusión inteligente: nunca sobreescribe con vacío las otras secciones
-        const existingRow = await dbGet('SELECT data FROM site_settings WHERE id = 1');
-        let current = DEFAULT_CONTENT;
-        if (existingRow && existingRow.data) {
-            try { current = JSON.parse(existingRow.data); } catch (err) { }
-        }
-        // Deep merge section_styles (each section is its own object)
-        const mergedSectionStyles = { ...(current.section_styles || {}) };
-        if (data.section_styles) {
-            for (const [sec, vals] of Object.entries(data.section_styles)) {
-                mergedSectionStyles[sec] = { ...(mergedSectionStyles[sec] || {}), ...vals };
-            }
-        }
-        const merged = {
-            texts: { ...(current.texts || {}), ...(data.texts || {}) },
-            styles: { ...(current.styles || {}), ...(data.styles || {}) },
-            section_styles: mergedSectionStyles,
-            images: { ...(current.images || {}), ...(data.images || {}) },
-            video: { ...(current.video || {}), ...(data.video || {}) },
-            clients_carousel: { ...(current.clients_carousel || {}), ...(data.clients_carousel || {}) }
-        };
+        const patch = validateContentPatch(req.body);
+        const current = await getContent();
+        const merged = validateContentPatch(mergeContent(current, patch));
         await dbRun(
             'INSERT INTO site_settings (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data',
             [JSON.stringify(merged)]
@@ -1263,8 +1376,11 @@ app.put(`/${ADMIN_PATH}/api/content`, requireAuth, async (req, res) => {
         invalidateContentCache();
         res.json({ success: true, data: merged });
     } catch (e) {
+        if (e instanceof ContentValidationError) {
+            return res.status(400).json({ error: e.message });
+        }
         console.error('Error guardando contenido CMS:', e);
-        res.status(500).json({ error: e.message || 'Error al guardar contenidos' });
+        res.status(500).json({ error: 'Error al guardar contenidos' });
     }
 });
 
@@ -1285,30 +1401,50 @@ app.post(`/${ADMIN_PATH}/api/delete-asset`, requireAuth, (req, res) => {
     if (!url || typeof url !== 'string' || !url.startsWith('/uploads/')) {
         return res.status(400).json({ error: 'URL inválida' });
     }
-    deleteUploadFile(url);
-    res.json({ success: true });
+    isUploadReferenced(url).then(referenced => {
+        if (referenced) return res.status(409).json({ error: 'El archivo todavía está en uso' });
+        deleteUploadFile(url);
+        return res.json({ success: true });
+    }).catch(error => {
+        console.error('Error comprobando referencias del archivo:', error);
+        res.status(500).json({ error: 'No se pudo eliminar el archivo' });
+    });
 });
 
 // Descarga directa de respaldo completo (.zip con base de datos y uploads)
-app.get(`/${ADMIN_PATH}/api/backup-db`, requireAuth, (req, res) => {
-    const dbPath = path.join(DATA_DIR, 'nad.db');
-    if (!fs.existsSync(dbPath)) {
-        return res.status(404).json({ error: 'Base de datos no encontrada' });
-    }
-    const fecha = new Date().toISOString().slice(0, 10);
-    res.attachment(`nad_backup_${fecha}.zip`);
+app.get(`/${ADMIN_PATH}/api/backup-db`, requireAuth, async (req, res) => {
+    let prepared;
+    try {
+        prepared = await prepareBackup({ db, uploadsDir: UPLOADS_DIR });
+        const date = new Date().toISOString().slice(0, 10);
+        res.setHeader('Cache-Control', 'no-store');
+        res.attachment(`nad_backup_${date}.zip`);
 
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.on('error', (err) => {
-        console.error('Error creando el respaldo:', err);
+        const archive = archiver('zip', { zlib: { level: 9 } });
+        let cleaned = false;
+        const cleanup = async () => {
+            if (cleaned) return;
+            cleaned = true;
+            await prepared.cleanup().catch(error => console.warn('No se pudo limpiar el backup temporal:', error.message));
+        };
+        archive.on('error', async error => {
+            console.error('Error creando el respaldo:', error);
+            await cleanup();
+            if (!res.headersSent) res.status(500).json({ error: 'Error al generar el respaldo' });
+            else res.destroy(error);
+        });
+        res.once('close', cleanup);
+        archive.pipe(res);
+        archive.file(prepared.snapshotPath, { name: 'nad.db' });
+        if (fs.existsSync(prepared.uploadsSnapshot)) {
+            archive.directory(prepared.uploadsSnapshot, 'uploads');
+        }
+        await archive.finalize();
+    } catch (error) {
+        if (prepared) await prepared.cleanup().catch(() => {});
+        console.error('Error creando el respaldo:', error);
         if (!res.headersSent) res.status(500).json({ error: 'Error al generar el respaldo' });
-    });
-    archive.pipe(res);
-    archive.file(dbPath, { name: 'nad.db' });
-    if (fs.existsSync(UPLOADS_DIR)) {
-        archive.directory(UPLOADS_DIR, 'uploads');
     }
-    archive.finalize();
 });
 
 app.post(`/${ADMIN_PATH}/api/change-password`, requireAuth, async (req, res) => {
@@ -1321,12 +1457,20 @@ app.post(`/${ADMIN_PATH}/api/change-password`, requireAuth, async (req, res) => 
     }
     try {
         const admin = await dbGet('SELECT * FROM admin WHERE id = ?', [req.session.admin.id]);
-        if (!admin || !bcrypt.compareSync(current, admin.password))
+        if (!admin || !(await bcrypt.compare(current, admin.password)))
             return res.status(400).json({ error: 'Contraseña actual incorrecta' });
-        const hashed = bcrypt.hashSync(newPass, 10);
+        const hashed = await bcrypt.hash(newPass, 12);
         await dbRun('UPDATE admin SET password = ? WHERE id = ?', [hashed, admin.id]);
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+        await dbRun('DELETE FROM sessions');
+        req.session.destroy(error => {
+            if (error) return res.status(500).json({ error: 'La contraseña cambió, pero no se pudo cerrar la sesión' });
+            res.clearCookie('nad.sid');
+            return res.json({ success: true, reauthenticate: true });
+        });
+    } catch (e) {
+        console.error('Error cambiando contraseña:', e);
+        res.status(500).json({ error: 'No se pudo cambiar la contraseña' });
+    }
 });
 
 // Manejador centralizado de errores para evitar respuestas HTML 500
@@ -1336,9 +1480,9 @@ app.use((err, req, res, next) => {
         if (err.code === 'LIMIT_FILE_SIZE') {
             return res.status(400).json({ error: 'El archivo excede el tamaño máximo permitido (25MB)' });
         }
-        return res.status(400).json({ error: 'Error al procesar archivo: ' + err.message });
+        return res.status(400).json({ error: 'Error al procesar el archivo enviado' });
     }
-    res.status(500).json({ error: err.message || 'Error interno del servidor' });
+    res.status(500).json({ error: 'Error interno del servidor' });
 });
 
 // NOTA: /health ya está registrado arriba (línea ~496) — se eliminó el duplicado
@@ -1348,7 +1492,7 @@ app.use((err, req, res, next) => {
 // Rutas SEO adicionales
 
 app.get('/sitemap.xml', (req, res) => {
-    const DOMAIN = req.protocol + '://' + req.get('host');
+    const DOMAIN = publicOrigin(req);
     db.all('SELECT id FROM projects WHERE visible = 1', [], (err, rows) => {
         let urls = `<url><loc>${DOMAIN}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>
 <url><loc>${DOMAIN}/proyectos</loc><changefreq>weekly</changefreq><priority>0.9</priority></url>
@@ -1368,7 +1512,7 @@ ${urls}</urlset>`;
 });
 
 app.get('/robots.txt', (req, res) => {
-    const DOMAIN = req.protocol + '://' + req.get('host');
+    const DOMAIN = publicOrigin(req);
     res.type('text/plain');
     res.send(`User-agent: *
 Allow: /
@@ -1376,21 +1520,49 @@ Sitemap: ${DOMAIN}/sitemap.xml`);
 });
 // -------------------------------
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 NAD Constructora → http://0.0.0.0:${PORT}`);
-    console.log(`🔐 Panel admin     → http://0.0.0.0:${PORT}/${ADMIN_PATH}`);
-    console.log(`🔒 Ruta secreta    → /${ADMIN_PATH}`);
+let server = null;
+let shuttingDown = false;
+
+databaseReady.then(() => {
+    if (!PERSISTENT_STORAGE_CONFIGURED) {
+        console.error('❌ DATA_DIR no está configurado en producción. /health permanecerá en 503 para impedir un deploy con almacenamiento efímero.');
+    }
+    server = app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🚀 NAD Constructora → http://0.0.0.0:${PORT}`);
+        console.log(`🔐 Panel administrativo habilitado en la ruta configurada`);
+    });
+}).catch(error => {
+    console.error('❌ No se pudo inicializar la base de datos:', error);
+    process.exitCode = 1;
+    db.close(() => process.exit(1));
 });
 
 function gracefulShutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    databaseReadyState = false;
     console.log(`\n🛑 Recibido ${signal}. Cerrando servidor y base de datos...`);
-    server.close(() => {
-        db.close(err => {
-            if (err) console.error('Error cerrando base de datos:', err);
-            else console.log('💾 Base de datos cerrada correctamente.');
+    const forceTimer = setTimeout(() => {
+        console.error('El cierre superó 10 segundos; se fuerza la salida.');
+        process.exit(1);
+    }, 10_000);
+    forceTimer.unref();
+
+    const closeDatabase = () => {
+        sessionStore.close();
+        db.close(error => {
+            clearTimeout(forceTimer);
+            if (error) {
+                console.error('Error cerrando base de datos:', error);
+                process.exit(1);
+            }
+            console.log('💾 Base de datos cerrada correctamente.');
             process.exit(0);
         });
-    });
+    };
+
+    if (server) server.close(closeDatabase);
+    else closeDatabase();
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));

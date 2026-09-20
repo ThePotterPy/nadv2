@@ -14,7 +14,7 @@ Sitio web corporativo con panel de administración CMS integrado para gestión d
 ## Desarrollo local
 
 ### Requisitos
-- Node.js 18 o superior
+- Node.js 20, 22 o 24 (el proyecto limita versiones futuras no verificadas)
 
 ### Instalación
 
@@ -57,6 +57,10 @@ Configurar estas variables desde Railway, sin guardarlas en el repositorio:
 | `ADMIN_PATH` | Ruta del panel administrativo | Usar una ruta propia y no predecible |
 | `NODE_ENV` | Entorno de ejecución | `production` |
 | `PORT` | Puerto HTTP | Railway normalmente lo inyecta automáticamente |
+| `SITE_URL` | Origen canónico y validación de solicitudes | `https://nadconstructora.com.py` |
+| `TRUST_PROXY_HOPS` | Proxies confiables delante de Node | `1` en Railway, salvo que cambie la topología |
+| `DATA_DIR` | Base y datos persistentes | Ruta exacta del volumen montado, por ejemplo `/data` |
+| `UPLOADS_DIR` | Archivos subidos | Opcional; por defecto usa `DATA_DIR/uploads` |
 
 Para generar un `SESSION_SECRET` seguro:
 
@@ -72,10 +76,11 @@ La base de datos y los archivos subidos necesitan almacenamiento persistente. En
 
 1. Abrir el proyecto y elegir **Add Volume**.
 2. Crear un volumen, por ejemplo `nad-data`.
-3. Montarlo en la ruta usada por `DATA_DIR` (por defecto el proyecto utiliza su carpeta `data`; en Railway se recomienda configurar `DATA_DIR` y `UPLOADS_DIR` para apuntar al volumen montado).
+3. Montarlo, por ejemplo, en `/data` y configurar `DATA_DIR=/data`. Se puede omitir `UPLOADS_DIR` para conservar los archivos en `/data/uploads`.
 4. Confirmar que el volumen siga conectado antes de reemplazar o recrear el servicio.
 
 Esto evita perder proyectos, configuración y archivos subidos durante redeploys.
+En producción, `/health` responde `503` si no se configuró almacenamiento persistente, evitando promover silenciosamente una instancia que perdería datos.
 
 ### 3. Deploy
 
@@ -84,6 +89,12 @@ Esto evita perder proyectos, configuración y archivos subidos durante redeploys
 3. Configurar el volumen persistente.
 4. Railway utilizará `railway.json`, cuyo comando de inicio es `npm start`.
 5. El health check del servicio usa `/health`.
+
+La aplicación usa SQLite y archivos locales, por lo que debe mantenerse en **una sola réplica**. Para escalar horizontalmente sería necesario migrar la base de datos y los uploads a servicios compartidos.
+
+### Respaldos
+
+El panel descarga un ZIP con una instantánea consistente de SQLite y la carpeta de uploads. El backup excluye sesiones administrativas. Guardarlo fuera de Railway y comprobar periódicamente que se pueda restaurar.
 
 ---
 
@@ -99,10 +110,14 @@ La aplicación incluye actualmente:
 - validación MIME y firma real de archivos subidos;
 - Content Security Policy y otros headers de Helmet;
 - sanitización del contenido dinámico del CMS;
+- validación estricta de colores, fuentes, URLs y claves editables del CMS;
+- backups consistentes aun cuando SQLite utiliza WAL;
+- limpieza de archivos huérfanos cuando una operación falla;
 - escape de valores dinámicos dentro del panel administrativo;
 - páginas de proyectos con 404 real y metadatos SEO propios;
 - comprobaciones automáticas mediante GitHub Actions;
 - auditoría automática de dependencias.
+- pruebas de regresión para CMS, backups, uploads, health checks y reinicios.
 
 ---
 
@@ -122,7 +137,10 @@ nad/
 ├── railway.json
 ├── lib/
 │   ├── security-config.js
-│   └── sqlite-session-store.js
+│   ├── sqlite-session-store.js
+│   ├── content-validation.js
+│   ├── database-migrations.js
+│   └── backup.js
 ├── admin/
 │   ├── index.html
 │   └── login.html
