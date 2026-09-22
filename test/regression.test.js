@@ -89,7 +89,7 @@ async function login(baseUrl, password) {
     return cookie;
 }
 
-test('la portada define un fondo oscuro antes de cargar estilos externos', () => {
+test('la portada define un fondo oscuro antes de cargar estilos externos y aísla el apilamiento del hero', () => {
     const homepage = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
     const criticalStyle = homepage.indexOf('id="critical-first-paint"');
     const externalStylesheet = homepage.indexOf('href="/styles.css"');
@@ -98,6 +98,13 @@ test('la portada define un fondo oscuro antes de cargar estilos externos', () =>
     assert.ok(criticalStyle < externalStylesheet, 'el fondo crítico debe llegar antes que la hoja CSS');
     assert.match(homepage, /html,\s*body\s*\{\s*background(?:-color)?:\s*#1a0305/i);
     assert.match(homepage, /\.hero\s*\{\s*background(?:-color)?:\s*#1a0305/i);
+    assert.match(homepage, /\.hero\s*\{[^}]*isolation:\s*isolate/i, 'el hero en index.html debe tener isolation: isolate para no tapar los slides');
+
+    const stylesCss = fs.readFileSync(path.join(ROOT, 'styles.css'), 'utf8');
+    assert.match(stylesCss, /\.hero\s*\{[^}]*isolation:\s*isolate/i, 'styles.css debe definir isolation: isolate en .hero');
+    assert.match(stylesCss, /\.hero-slider\s*\{[^}]*z-index:\s*0\s*;/i, 'el slider debe quedar sobre el fondo sólido del hero');
+    assert.match(stylesCss, /\.hero-overlay\s*\{[^}]*z-index:\s*1\s*;/i, 'el overlay debe quedar sobre las imágenes');
+    assert.match(stylesCss, /\.hero-content\s*\{[^}]*z-index:\s*2\s*;/i, 'el contenido debe quedar sobre el overlay');
 });
 
 function readSetting(dbPath) {
