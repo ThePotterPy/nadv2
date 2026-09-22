@@ -39,6 +39,17 @@ function publicOrigin(req) {
 const TRUST_PROXY_HOPS = Number.parseInt(process.env.TRUST_PROXY_HOPS || '1', 10);
 app.set('trust proxy', Number.isInteger(TRUST_PROXY_HOPS) && TRUST_PROXY_HOPS >= 0 ? TRUST_PROXY_HOPS : 1);
 
+// Si el DNS de www apunta a esta aplicaciÃ³n, consolidar toda la autoridad SEO
+// en el dominio canÃ³nico configurado. La redirecciÃ³n conserva ruta y query.
+app.use((req, res, next) => {
+    if (!SITE_URL) return next();
+    const canonical = new URL(SITE_URL);
+    if (req.hostname.toLowerCase() === `www.${canonical.hostname.toLowerCase()}`) {
+        return res.redirect(301, SITE_URL + req.originalUrl);
+    }
+    return next();
+});
+
 // ── Ruta secreta del panel admin ─────────────────────────────────────────────
 const rawAdminPath = (process.env.ADMIN_PATH || 'gestion-nad-admin-nosequeponer').trim().replace(/['"]/g, '').replace(/^\/+|\/+$/g, '');
 const ADMIN_PATH = (!/^[a-zA-Z0-9_-]{8,100}$/.test(rawAdminPath) || rawAdminPath === 'reemplazar-por-ruta-admin-no-predecible' || rawAdminPath === 'gestion-nad-2026')
@@ -458,7 +469,7 @@ app.use('/vendor/fontawesome', express.static(path.join(__dirname, 'node_modules
 // --- SEO & Dynamic Rendering ---
 const defaultMeta = {
     title: 'NAD Constructora | Arquitectura, Diseño y Construcción',
-    desc: 'NAD Constructora ofrece servicios integrales de estudio de factibilidad, proyecto arquitectónico y construcción en Paraguay. Calidad, compromiso y excelencia técnica en cada obra.',
+    desc: 'NAD Constructora desarrolla proyectos de arquitectura, diseño estructural y construcción en Paraguay, con más de 35 años de experiencia.',
     image: '/nad.png',
     url: '/'
 };
@@ -666,6 +677,108 @@ async function getPublicProjects() {
     return cachedPublicProjects;
 }
 
+function serializeJsonLd(value) {
+    return JSON.stringify(value)
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e')
+        .replace(/&/g, '\\u0026');
+}
+
+function renderHomeProjectCards(projects) {
+    let featured = projects.filter(project => project.featured === 1);
+    if (!featured.length) featured = projects;
+
+    return featured.slice(0, 3).map((project, index) => {
+        const image = safePublicMediaUrl(project.image) || '/nad.png';
+        const url = `/proyecto/${encodeURIComponent(project.id)}`;
+        const delay = (index % 3) + 1;
+        return `
+                <article class="project-card fade-up delay-${delay}" data-year="${escapeHtml(project.year)}">
+                    <div class="project-image">
+                        <img src="${escapeHtml(image)}" alt="${escapeHtml(project.title)}" loading="lazy" decoding="async">
+                        <div class="project-overlay">
+                            <a class="project-link open-modal-btn" href="${url}"
+                                data-id="${escapeHtml(project.id)}"
+                                data-title="${escapeHtml(project.title)}"
+                                data-category="${escapeHtml(project.category)}"
+                                data-desc="${escapeHtml(project.description)}"
+                                data-location="${escapeHtml(project.location)}"
+                                data-year="${escapeHtml(project.year)}"
+                                data-image="${escapeHtml(image)}"
+                                aria-label="Ver detalles del proyecto ${escapeHtml(project.title)}">
+                                <i data-lucide="arrow-up-right"></i>
+                            </a>
+                        </div>
+                    </div>
+                    <div class="project-info">
+                        <span class="project-year-tag">${escapeHtml(project.year)}</span>
+                        <h3><a href="${url}">${escapeHtml(project.title)}</a></h3>
+                        <p>${escapeHtml(project.category)}</p>
+                    </div>
+                </article>`;
+    }).join('');
+}
+
+function renderProjectsIndex(projects) {
+    return projects.map((project, index) => {
+        const image = safePublicMediaUrl(project.image) || '/nad.png';
+        const url = `/proyecto/${encodeURIComponent(project.id)}`;
+        const reverse = index % 2 !== 0 ? ' reverse' : '';
+        return `
+        <article class="project-block${reverse}">
+            <div class="project-media">
+                <div class="swiper project-swiper">
+                    <div class="swiper-wrapper">
+                        <div class="swiper-slide"><img src="${escapeHtml(image)}" alt="${escapeHtml(project.title)}" loading="lazy" decoding="async"></div>
+                    </div>
+                </div>
+            </div>
+            <a class="project-info project-info-link" href="${url}">
+                <div class="project-meta">
+                    <span class="meta-badge"><span>${escapeHtml(project.category)}</span></span>
+                    <span class="meta-badge"><span>${escapeHtml(project.location)}</span></span>
+                </div>
+                <h2 class="project-title">${escapeHtml(project.title)}</h2>
+                <p class="project-desc">${escapeHtml(project.description)}</p>
+                <span class="btn btn-primary" style="align-self:flex-start;">Ver proyecto completo</span>
+            </a>
+        </article>`;
+    }).join('');
+}
+
+function injectServerRenderedProjects(html, filename, projects, domain, nonce) {
+    const replacement = filename === 'index.html'
+        ? renderHomeProjectCards(projects)
+        : renderProjectsIndex(projects);
+    html = html.replace(
+        /<!-- SERVER_PROJECTS_START -->[\s\S]*?<!-- SERVER_PROJECTS_END -->/,
+        `<!-- SERVER_PROJECTS_START -->${replacement}<!-- SERVER_PROJECTS_END -->`
+    );
+
+    if (filename === 'proyectos.html') {
+        const itemList = {
+            '@context': 'https://schema.org',
+            '@type': 'CollectionPage',
+            name: 'Proyectos de NAD Constructora',
+            url: `${domain}/proyectos`,
+            mainEntity: {
+                '@type': 'ItemList',
+                itemListElement: projects.map((project, index) => ({
+                    '@type': 'ListItem',
+                    position: index + 1,
+                    name: project.title,
+                    url: `${domain}/proyecto/${encodeURIComponent(project.id)}`
+                }))
+            }
+        };
+        html = html.replace(
+            '</head>',
+            `    <script type="application/ld+json" nonce="${nonce}">${serializeJsonLd(itemList)}</script>\n</head>`
+        );
+    }
+    return html;
+}
+
 async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
     const DOMAIN = publicOrigin(req);
     const meta = { ...defaultMeta, ...metaOverride };
@@ -673,10 +786,11 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
 
     try {
         // Obtener config para inyectar CSS variables y evitar FOUC
-        const config = await getContent();
+        const [config, projects] = await Promise.all([getContent(), getPublicProjects()]);
         const stylesData = config ? config.styles : null;
         let html = getHtmlTemplate(filename);
         html = html.replace(/<script type="application\/ld\+json">/g, `<script type="application/ld+json" nonce="${cspNonce}">`);
+        html = injectServerRenderedProjects(html, filename, projects, DOMAIN, cspNonce);
 
         // Inyectar imágenes del CMS para evitar FOUC y flashes de imágenes por defecto
         const sliderImgs = (config && config.images && Array.isArray(config.images.hero_slider) && config.images.hero_slider.length > 0)
@@ -826,6 +940,7 @@ async function renderPageWithMeta(filename, req, res, metaOverride = {}) {
             html = upsertMetaTag(html, 'property', 'og:description', meta.desc);
             html = upsertMetaTag(html, 'property', 'og:image', socialImage);
             html = upsertMetaTag(html, 'property', 'og:url', canonicalUrl);
+            html = upsertMetaTag(html, 'property', 'og:locale', 'es_PY');
             html = upsertMetaTag(html, 'name', 'twitter:card', 'summary_large_image');
             html = upsertMetaTag(html, 'name', 'twitter:title', meta.title);
             html = upsertMetaTag(html, 'name', 'twitter:description', meta.desc);
@@ -869,10 +984,13 @@ function safePublicMediaUrl(value) {
 
 async function renderProjectPage(req, res, row) {
     const domain = publicOrigin(req);
+    const cspNonce = crypto.randomBytes(18).toString('base64');
     const content = await getContent();
     const logoUrl = safePublicMediaUrl(content?.images?.logo) || '/nad.png';
     const canonicalUrl = domain + '/proyecto/' + row.id;
     const primaryUrl = safePublicMediaUrl(row.image) || '/nad.png';
+    const absolutePrimaryUrl = primaryUrl.startsWith('http') ? primaryUrl : domain + primaryUrl;
+    const absoluteLogoUrl = logoUrl.startsWith('http') ? logoUrl : domain + logoUrl;
     const isPrimaryVideo = /\.(mp4|webm|mov)(?:$|\?)/i.test(primaryUrl);
     const primaryMedia = isPrimaryVideo
         ? `<video src="${escapeHtml(primaryUrl)}" controls playsinline preload="metadata"></video>`
@@ -901,7 +1019,40 @@ async function renderProjectPage(req, res, row) {
 
     const ogImage = isPrimaryVideo
         ? domain + '/nad.png'
-        : (primaryUrl.startsWith('http') ? primaryUrl : domain + primaryUrl);
+        : absolutePrimaryUrl;
+
+    const projectSchema = {
+        '@context': 'https://schema.org',
+        '@graph': [
+            {
+                '@type': 'CreativeWork',
+                '@id': `${canonicalUrl}#project`,
+                name: row.title,
+                description: row.description,
+                url: canonicalUrl,
+                image: absolutePrimaryUrl,
+                about: row.category,
+                contentLocation: {
+                    '@type': 'Place',
+                    name: row.location
+                },
+                creator: {
+                    '@type': 'GeneralContractor',
+                    name: 'NAD Constructora',
+                    url: domain + '/',
+                    logo: absoluteLogoUrl
+                }
+            },
+            {
+                '@type': 'BreadcrumbList',
+                itemListElement: [
+                    { '@type': 'ListItem', position: 1, name: 'Inicio', item: domain + '/' },
+                    { '@type': 'ListItem', position: 2, name: 'Proyectos', item: domain + '/proyectos' },
+                    { '@type': 'ListItem', position: 3, name: row.title, item: canonicalUrl }
+                ]
+            }
+        ]
+    };
 
     const replacements = {
         '{{TITLE}}': escapeHtml(row.title || 'Proyecto'),
@@ -913,6 +1064,8 @@ async function renderProjectPage(req, res, row) {
         '{{LOGO_URL}}': escapeHtml(logoUrl),
         '{{CANONICAL_URL}}': escapeHtml(canonicalUrl),
         '{{OG_IMAGE}}': escapeHtml(ogImage),
+        '{{CSP_NONCE}}': escapeHtml(cspNonce),
+        '{{STRUCTURED_DATA}}': serializeJsonLd(projectSchema),
         '{{WHATSAPP_TEXT}}': encodeURIComponent(`Hola NAD Constructora, quiero consultar por un proyecto similar a "${row.title || 'este proyecto'}".`),
         '{{PRIMARY_MEDIA}}': primaryMedia,
         '{{GALLERY_SECTION}}': gallerySection
@@ -923,7 +1076,7 @@ async function renderProjectPage(req, res, row) {
         html = html.split(placeholder).join(value);
     }
 
-    applyPublicCsp(res, crypto.randomBytes(18).toString('base64'));
+    applyPublicCsp(res, cspNonce);
     res.type('html').send(html);
 }
 
@@ -1277,7 +1430,7 @@ app.put(`/${ADMIN_PATH}/api/projects/:id`, requireAuth, (req, res, next) => {
         if (extraMediaUrls.length > 60) throw new ContentValidationError('La galería supera el máximo de 60 archivos');
 
         await dbRun(
-            'UPDATE projects SET title=?,category=?,description=?,location=?,year=?,image=?,featured=?,visible=?,extra_media=?,status=? WHERE id=?',
+            'UPDATE projects SET title=?,category=?,description=?,location=?,year=?,image=?,featured=?,visible=?,extra_media=?,status=?,updated_at=datetime(\'now\') WHERE id=?',
             [
                 project.title,
                 project.category,
@@ -1331,7 +1484,7 @@ app.patch(`/${ADMIN_PATH}/api/projects/:id/toggle`, requireAuth, async (req, res
         const p = await dbGet('SELECT visible FROM projects WHERE id = ?', [req.params.id]);
         if (!p) return res.status(404).json({ error: 'No encontrado' });
         const newVal = p.visible === 1 ? 0 : 1;
-        await dbRun('UPDATE projects SET visible = ? WHERE id = ?', [newVal, req.params.id]);
+        await dbRun('UPDATE projects SET visible = ?, updated_at = datetime(\'now\') WHERE id = ?', [newVal, req.params.id]);
         invalidateProjectsCache();
         res.json({ visible: newVal });
     } catch (e) {
@@ -1345,7 +1498,7 @@ app.patch(`/${ADMIN_PATH}/api/projects/:id/toggle-featured`, requireAuth, async 
         const p = await dbGet('SELECT featured FROM projects WHERE id = ?', [req.params.id]);
         if (!p) return res.status(404).json({ error: 'No encontrado' });
         const newVal = p.featured === 1 ? 0 : 1;
-        await dbRun('UPDATE projects SET featured = ? WHERE id = ?', [newVal, req.params.id]);
+        await dbRun('UPDATE projects SET featured = ?, updated_at = datetime(\'now\') WHERE id = ?', [newVal, req.params.id]);
         invalidateProjectsCache();
         res.json({ featured: newVal });
     } catch (e) {
@@ -1491,24 +1644,32 @@ app.use((err, req, res, next) => {
 // ── Arranque y Cierre Limpio (Railway) ───────────────────────────────────────
 // Rutas SEO adicionales
 
-app.get('/sitemap.xml', (req, res) => {
-    const DOMAIN = publicOrigin(req);
-    db.all('SELECT id FROM projects WHERE visible = 1', [], (err, rows) => {
-        let urls = `<url><loc>${DOMAIN}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>
-<url><loc>${DOMAIN}/proyectos</loc><changefreq>weekly</changefreq><priority>0.9</priority></url>
-`;
-        if (!err && rows) {
-            rows.forEach(r => {
-                urls += `<url><loc>${DOMAIN}/proyecto/${r.id}</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
-`;
-            });
-        }
+app.get('/sitemap.xml', async (req, res) => {
+    const domain = publicOrigin(req);
+    try {
+        const rows = await dbAll(
+            `SELECT id, date(COALESCE(updated_at, created_at)) AS lastmod
+             FROM projects
+             WHERE visible = 1
+             ORDER BY featured DESC, year DESC, id DESC`
+        );
+        const latest = rows.map(row => row.lastmod).filter(Boolean).sort().at(-1);
+        const lastmod = value => value ? `<lastmod>${value}</lastmod>` : '';
+        const urls = [
+            `<url><loc>${domain}/</loc>${lastmod(latest)}</url>`,
+            `<url><loc>${domain}/proyectos</loc>${lastmod(latest)}</url>`,
+            ...rows.map(row => `<url><loc>${domain}/proyecto/${row.id}</loc>${lastmod(row.lastmod)}</url>`)
+        ].join('\n');
         const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${urls}</urlset>`;
-        res.header('Content-Type', 'application/xml');
-        res.send(xml);
-    });
+${urls}
+</urlset>`;
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        res.type('application/xml').send(xml);
+    } catch (error) {
+        console.error('Error generando sitemap:', error);
+        res.status(500).type('text/plain').send('No se pudo generar el sitemap');
+    }
 });
 
 app.get('/robots.txt', (req, res) => {

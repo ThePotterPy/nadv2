@@ -43,6 +43,7 @@ async function waitForReady(baseUrl, child) {
 
 async function startApplication(dataDir, credentials) {
     const port = await freePort();
+    const baseUrl = `http://127.0.0.1:${port}`;
     const child = spawn(process.execPath, ['-r', './security-bootstrap.js', 'server.js'], {
         cwd: ROOT,
         env: {
@@ -52,12 +53,12 @@ async function startApplication(dataDir, credentials) {
             DATA_DIR: dataDir,
             UPLOADS_DIR: path.join(dataDir, 'uploads'),
             ADMIN_PATH: 'audit-panel',
+            SITE_URL: baseUrl,
             SESSION_SECRET: credentials.secret,
             ADMIN_DEFAULT_PASS: credentials.password
         },
         stdio: ['ignore', 'pipe', 'pipe']
     });
-    const baseUrl = `http://127.0.0.1:${port}`;
     await waitForReady(baseUrl, child);
     return { child, baseUrl };
 }
@@ -87,6 +88,17 @@ async function login(baseUrl, password) {
     assert.match(cookie, /^nad\.sid=/);
     return cookie;
 }
+
+test('la portada define un fondo oscuro antes de cargar estilos externos', () => {
+    const homepage = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+    const criticalStyle = homepage.indexOf('id="critical-first-paint"');
+    const externalStylesheet = homepage.indexOf('href="/styles.css"');
+
+    assert.ok(criticalStyle > -1, 'falta el estilo crítico del primer render');
+    assert.ok(criticalStyle < externalStylesheet, 'el fondo crítico debe llegar antes que la hoja CSS');
+    assert.match(homepage, /html,\s*body\s*\{\s*background(?:-color)?:\s*#1a0305/i);
+    assert.match(homepage, /\.hero\s*\{\s*background(?:-color)?:\s*#1a0305/i);
+});
 
 function readSetting(dbPath) {
     return new Promise((resolve, reject) => {
@@ -216,6 +228,44 @@ test('regresiones críticas del CMS, backup, archivos, salud y semillas', { time
         const page = await (await fetch(`${application.baseUrl}/proyecto/1`)).text();
         assert.match(page, new RegExp(`<img src="${logoUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}" alt="NAD Constructora"`));
         assert.equal(page.includes('<img src="/nad.png" alt="NAD Constructora">'), false);
+    });
+
+    await t.test('renderiza enlaces rastreables y datos estructurados de proyectos', async () => {
+        const projects = await (await fetch(`${application.baseUrl}/api/projects`)).json();
+        assert.ok(projects.length > 0);
+        const project = projects[0];
+        const projectPath = `/proyecto/${project.id}`;
+
+        const homepage = await (await fetch(`${application.baseUrl}/`)).text();
+        const listing = await (await fetch(`${application.baseUrl}/proyectos`)).text();
+        assert.match(homepage, new RegExp(`href="${projectPath}"`));
+        assert.match(listing, new RegExp(`href="${projectPath}"`));
+        assert.match(listing, /"@type":"ItemList"/);
+
+        const detail = await (await fetch(`${application.baseUrl}${projectPath}`)).text();
+        assert.match(detail, /"@type":"CreativeWork"/);
+        assert.match(detail, /"@type":"BreadcrumbList"/);
+        assert.match(detail, /class="project-breadcrumbs container"/);
+        assert.equal(detail.includes('{{STRUCTURED_DATA}}'), false);
+        assert.equal(detail.includes('{{CSP_NONCE}}'), false);
+    });
+
+    await t.test('el sitemap incluye fechas reales de modificación', async () => {
+        const response = await fetch(`${application.baseUrl}/sitemap.xml`);
+        assert.equal(response.status, 200);
+        const sitemap = await response.text();
+        assert.match(sitemap, /<lastmod>\d{4}-\d{2}-\d{2}<\/lastmod>/);
+        assert.match(sitemap, /<loc>http:\/\/127\.0\.0\.1:\d+\/proyecto\/\d+<\/loc>/);
+    });
+
+    await t.test('redirige www al dominio canónico configurado', async () => {
+        const canonical = new URL(application.baseUrl);
+        const response = await fetch(`${application.baseUrl}/proyectos?vista=grid`, {
+            redirect: 'manual',
+            headers: { 'x-forwarded-host': `www.${canonical.host}` }
+        });
+        assert.equal(response.status, 301);
+        assert.equal(response.headers.get('location'), `${application.baseUrl}/proyectos?vista=grid`);
     });
 
     await t.test('eliminar todos los proyectos es persistente después de reiniciar', async () => {

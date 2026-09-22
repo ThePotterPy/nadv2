@@ -20,6 +20,14 @@
     <meta name="twitter:description" content="{{DESCRIPTION}}">
     <meta name="twitter:image" content="{{OG_IMAGE}}">
 
+    <script type="application/ld+json" nonce="{{CSP_NONCE}}">{{STRUCTURED_DATA}}</script>
+    <style nonce="{{CSP_NONCE}}">
+        .project-breadcrumbs { display:flex; align-items:center; gap:.55rem; padding-top:1.25rem; color:#6b7280; font-size:.9rem; }
+        .project-breadcrumbs a { color:#7a0b14; font-weight:700; text-decoration:none; }
+        .project-breadcrumbs a:hover { text-decoration:underline; }
+        .project-breadcrumbs [aria-current="page"] { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    </style>
+
     <link rel="stylesheet" href="/styles.css">
     <link rel="stylesheet" href="/project-detail.css">
 </head>
@@ -37,6 +45,13 @@
     </header>
 
     <main>
+        <nav class="project-breadcrumbs container" aria-label="Migas de pan">
+            <a href="/">Inicio</a>
+            <span aria-hidden="true">/</span>
+            <a href="/proyectos">Proyectos</a>
+            <span aria-hidden="true">/</span>
+            <span aria-current="page">{{TITLE}}</span>
+        </nav>
         <section class="project-detail-hero">
             <div class="container project-detail-grid">
                 <div class="project-detail-copy">

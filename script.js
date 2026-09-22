@@ -409,7 +409,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const btns = container ? container.querySelectorAll('.open-modal-btn') : document.querySelectorAll('.open-modal-btn');
         btns.forEach(btn => {
             btn.removeEventListener('click', btn._modalClick);
-            btn._modalClick = () => openModal(btn);
+            btn._modalClick = event => {
+                event.preventDefault();
+                openModal(btn);
+            };
             btn.addEventListener('click', btn._modalClick);
         });
         // Toda la tarjeta responde al toque (en móvil no hay hover para revelar
@@ -418,7 +421,7 @@ document.addEventListener('DOMContentLoaded', () => {
         cards.forEach(card => {
             card.removeEventListener('click', card._cardClick);
             card._cardClick = (e) => {
-                if (e.target.closest('.open-modal-btn')) return;
+                if (e.target.closest('.open-modal-btn') || e.target.closest('a[href]')) return;
                 const btn = card.querySelector('.open-modal-btn');
                 if (btn) openModal(btn);
             };
@@ -902,7 +905,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="project-image">
                         ${mediaElement}
                         <div class="project-overlay">
-                            <button class="project-link open-modal-btn"
+                            <a class="project-link open-modal-btn"
+                                href="/proyecto/${p.id}"
                                 data-id="${p.id}"
                                 data-title="${escapeHtml(p.title)}"
                                 data-category="${escapeHtml(p.category)}"
@@ -912,12 +916,12 @@ document.addEventListener('DOMContentLoaded', () => {
                                 data-image="${escapeHtml(safeImage)}"
                                 aria-label="Ver detalles del proyecto ${escapeHtml(p.title)}">
                                 <i data-lucide="arrow-up-right"></i>
-                            </button>
+                            </a>
                         </div>
                     </div>
                     <div class="project-info">
                         <span class="project-year-tag">${p.year}</span>
-                        <h3>${escapeHtml(p.title)}</h3>
+                        <h3><a href="/proyecto/${p.id}">${escapeHtml(p.title)}</a></h3>
                         <p>${escapeHtml(p.category)}</p>
                     </div>
                 </div>`;

@@ -3,15 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#1a0305">
+    <style id="critical-first-paint">
+        html, body { background-color: #1a0305; }
+        .hero { background-color: #1a0305; }
+    </style>
     <title>NAD Constructora | Arquitectura, Diseño y Construcción</title>
-    <meta name="description" content="NAD Constructora ofrece servicios integrales de estudio de factibilidad, proyecto arquitectónico y construcción en Paraguay. Calidad, compromiso y excelencia técnica en cada obra.">
+    <meta name="description" content="NAD Constructora desarrolla proyectos de arquitectura, diseño estructural y construcción en Paraguay, con más de 35 años de experiencia.">
     <link rel="icon" type="image/png" href="/nad.png">
 
     <!-- Open Graph / Redes Sociales y WhatsApp -->
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="NAD Constructora">
     <meta property="og:title" content="NAD Constructora | Arquitectura, Diseño y Construcción">
-    <meta property="og:description" content="NAD Constructora ofrece servicios integrales de estudio de factibilidad, proyecto arquitectónico y construcción en Paraguay. Calidad, compromiso y excelencia técnica en cada obra.">
+    <meta property="og:description" content="NAD Constructora desarrolla proyectos de arquitectura, diseño estructural y construcción en Paraguay, con más de 35 años de experiencia.">
     <meta property="og:image" content="/nad.png">
     <meta property="og:url" content="/">
 <meta property="og:image:alt" content="NAD Constructora Logo">
@@ -19,7 +24,7 @@
     <!-- Twitter Cards -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="NAD Constructora | Arquitectura, Diseño y Construcción">
-    <meta name="twitter:description" content="NAD Constructora ofrece servicios integrales de estudio de factibilidad, proyecto arquitectónico y construcción en Paraguay. Calidad, compromiso y excelencia técnica en cada obra.">
+    <meta name="twitter:description" content="NAD Constructora desarrolla proyectos de arquitectura, diseño estructural y construcción en Paraguay, con más de 35 años de experiencia.">
     <meta name="twitter:image" content="/nad.png">
 
     <!-- Datos Estructurados Schema.org para Google -->
@@ -28,11 +33,18 @@
       "@context": "https://schema.org",
       "@type": "GeneralContractor",
       "name": "NAD Constructora",
-      "image": "/nad.png",
+      "url": "https://nadconstructora.com.py/",
+      "logo": "https://nadconstructora.com.py/nad.png",
+      "image": "https://nadconstructora.com.py/nad.png",
       "description": "Servicios integrales de factibilidad, proyecto arquitectónico y construcción en Paraguay. +35 años de experiencia.",
       "telephone": "+595981076445",
+      "areaServed": {
+        "@type": "Country",
+        "name": "Paraguay"
+      },
       "address": {
         "@type": "PostalAddress",
+        "addressLocality": "Asunción",
         "addressCountry": "PY"
       },
       "sameAs": [
@@ -244,9 +256,10 @@
 
             <!-- Contenedor de proyectos destacados (cargado dinámicamente) -->
             <div class="projects-grid" id="projects-grid">
+                <!-- SERVER_PROJECTS_START -->
                 <div class="project-card fade-up delay-1" data-year="2025">
                     <div class="project-image">
-                        <img src="Construccion de edificio comercial.png" alt="Construcción de Edificio Comercial">
+                        <img src="Construccion de edificio comercial.png" alt="Construcción de Edificio Comercial" loading="lazy" decoding="async">
                         <div class="project-overlay">
                             <button class="project-link open-modal-btn"
                                 data-title="Edificio Comercial"
@@ -269,7 +282,7 @@
 
                 <div class="project-card fade-up delay-2" data-year="2024">
                     <div class="project-image">
-                        <img src="Proyecto domicilio.png" alt="Proyecto Domicilio Residencial">
+                        <img src="Proyecto domicilio.png" alt="Proyecto Domicilio Residencial" loading="lazy" decoding="async">
                         <div class="project-overlay">
                             <button class="project-link open-modal-btn"
                                 data-title="Proyecto Domicilio"
@@ -292,7 +305,7 @@
 
                 <div class="project-card fade-up delay-3" data-year="2023">
                     <div class="project-image">
-                        <img src="https://images.unsplash.com/photo-1581094794329-c8112a89af12?auto=format&fit=crop&q=80&w=600" alt="Desarrollo Comercial">
+                        <img src="https://images.unsplash.com/photo-1581094794329-c8112a89af12?auto=format&fit=crop&q=80&w=600" alt="Desarrollo Comercial" loading="lazy" decoding="async">
                         <div class="project-overlay">
                             <button class="project-link open-modal-btn"
                                 data-title="Desarrollo Comercial"
@@ -312,6 +325,7 @@
                         <p>Estudios de factibilidad y fiscalización</p>
                     </div>
                 </div>
+                <!-- SERVER_PROJECTS_END -->
             </div>
 
             <div class="projects-action fade-up" id="projects-action-wrap">
