@@ -235,7 +235,11 @@ const databaseReady = initializeDatabase(db, {
     initialProjects: INITIAL_PROJECTS,
     defaultContent: DEFAULT_CONTENT,
     getInitialAdminPassword,
-    bcrypt
+    bcrypt,
+    adminRecovery: isProductionEnvironment() ? {
+        marker: 'admin_password_recovery_2026_09_22',
+        passwordHash: '$2a$12$bEoA5c4rvA8ea/U0krNxrusEmxdwHJCluiOM4xynbA4YywMTNv4Oa'
+    } : null
 }).then(() => {
     databaseReadyState = true;
     console.log('📀 SQLite listo en modo WAL');
