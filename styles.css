@@ -1933,7 +1933,14 @@ p { text-wrap: pretty; }
     }
     
     .hero-overlay {
-        background: var(--sec-bg-light, rgba(0,0,0,0.05));
+        /* Conserva el degradado oscuro de escritorio y suaviza apenas la foto
+           para asegurar legibilidad sobre zonas claras en pantallas pequeñas. */
+        -webkit-backdrop-filter: blur(1.5px);
+        backdrop-filter: blur(1.5px);
+    }
+
+    .hero p {
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.72);
     }
 
     .hero h1 {
