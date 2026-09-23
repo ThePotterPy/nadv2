@@ -2074,6 +2074,18 @@ p { text-wrap: pretty; }
     position: relative;
     padding-bottom: 3.5rem;
 }
+.video-swiper-container .swiper-wrapper { align-items: flex-start; }
+.video-swiper-container .swiper-slide { min-width: 0; }
+.video-swiper-container .instagram-media {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    margin: 0 !important;
+}
+.video-swiper-container .swiper-pagination.swiper-pagination-horizontal {
+    left: 64px;
+    width: calc(100% - 128px);
+}
 .video-swiper-container .swiper-button-next,
 .video-swiper-container .swiper-button-prev {
     top: auto;

@@ -792,7 +792,11 @@ document.addEventListener('DOMContentLoaded', () => {
                             if (typeof Swiper !== 'undefined') {
                                 window.videoSwiperInstance = new Swiper('.video-swiper', {
                                     slidesPerView: 1,
-                                    spaceBetween: 30,
+                                    spaceBetween: 24,
+                                    breakpoints: {
+                                        768: { slidesPerView: 2 },
+                                        1100: { slidesPerView: 3 }
+                                    },
                                     loop: false,
                                     autoHeight: true,
                                     observer: true,
@@ -801,8 +805,29 @@ document.addEventListener('DOMContentLoaded', () => {
                                         nextEl: '.video-swiper .swiper-button-next',
                                         prevEl: '.video-swiper .swiper-button-prev',
                                     },
+                                    pagination: {
+                                        el: '.video-swiper .swiper-pagination',
+                                        clickable: true
+                                    },
+                                    a11y: {
+                                        prevSlideMessage: 'Publicación anterior',
+                                        nextSlideMessage: 'Publicación siguiente',
+                                        paginationBulletMessage: 'Ir a la publicación {{index}}'
+                                    },
                                     grabCursor: true
                                 });
+                                // Instagram ajusta su altura después de cargar el contenido.
+                                // Mantener los controles debajo de la publicación más alta.
+                                if (typeof ResizeObserver !== 'undefined') {
+                                    const videoSwiper = window.videoSwiperInstance;
+                                    const mediaResizeObserver = new ResizeObserver(() => {
+                                        if (!videoSwiper.destroyed) videoSwiper.updateAutoHeight();
+                                    });
+                                    swiperWrapper.querySelectorAll('.swiper-slide').forEach(slide => {
+                                        mediaResizeObserver.observe(slide);
+                                    });
+                                    videoSwiper.on('destroy', () => mediaResizeObserver.disconnect());
+                                }
                             }
 
                             // Inicializar Plyr
